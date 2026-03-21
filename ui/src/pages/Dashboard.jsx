@@ -1,0 +1,140 @@
+import React, { useState, useEffect, useCallback } from 'react'
+import { getTokens } from '../api.js'
+import StatusBadge from '../components/StatusBadge.jsx'
+import TokenMeter from '../components/TokenMeter.jsx'
+
+const ACCENT = '#e94560'
+const CARD = { background: '#16162a', borderRadius: 12, padding: 24, border: '1px solid #2a2a40' }
+
+function StatCard({ label, value, sub, color }) {
+  return (
+    <div style={{ ...CARD, flex: 1, minWidth: 140 }}>
+      <div style={{ fontSize: 12, color: '#888', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>{label}</div>
+      <div style={{ fontSize: 28, fontWeight: 700, color: color || '#e0e0e0' }}>{typeof value === 'number' ? value.toLocaleString() : value}</div>
+      {sub && <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>{sub}</div>}
+    </div>
+  )
+}
+
+export default function Dashboard() {
+  const [data, setData] = useState(null)
+  const [error, setError] = useState(null)
+  const [lastUpdated, setLastUpdated] = useState(null)
+
+  const fetchData = useCallback(async () => {
+    try {
+      const d = await getTokens()
+      setData(d)
+      setLastUpdated(new Date())
+      setError(null)
+    } catch (e) {
+      setError(e.message)
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchData()
+    const iv = setInterval(fetchData, 30000)
+    return () => clearInterval(iv)
+  }, [fetchData])
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24 }}>
+        <h1 style={{ fontSize: 24, fontWeight: 700, color: '#fff' }}>📊 Dashboard</h1>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          {lastUpdated && (
+            <span style={{ fontSize: 12, color: '#555' }}>
+              Updated {lastUpdated.toLocaleTimeString()}
+            </span>
+          )}
+          <button
+            onClick={fetchData}
+            style={{
+              background: ACCENT,
+              color: '#fff',
+              border: 'none',
+              borderRadius: 8,
+              padding: '6px 14px',
+              cursor: 'pointer',
+              fontSize: 13,
+              fontWeight: 600,
+            }}
+          >
+            ↻ Refresh
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <div style={{ ...CARD, borderColor: '#ef4444', color: '#ef4444', marginBottom: 24 }}>
+          ⚠️ {error}
+        </div>
+      )}
+
+      {data && (
+        <>
+          {/* Status Card */}
+          <div style={{ ...CARD, marginBottom: 24 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+              <StatusBadge status={data.status} />
+              <span style={{ fontSize: 15, color: '#ccc' }}>{data.message}</span>
+            </div>
+            <TokenMeter
+              total={data.total_tokens_approx || 0}
+              warn={data.warn_threshold}
+              distill={data.distill_threshold}
+            />
+          </div>
+
+          {/* Breakdown Stats */}
+          <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 24 }}>
+            <StatCard
+              label="Session Tokens"
+              value={data.session_tokens || 0}
+              sub={`${data.session_files || 0} files`}
+              color="#60a5fa"
+            />
+            <StatCard
+              label="Claude Tokens"
+              value={data.claude_tokens || 0}
+              sub={`${data.claude_session_files || 0} files`}
+              color="#a78bfa"
+            />
+            <StatCard
+              label="Memory Tokens"
+              value={data.memory_tokens || 0}
+              color="#34d399"
+            />
+            <StatCard
+              label="Total Approx"
+              value={data.total_tokens_approx || 0}
+              color={ACCENT}
+            />
+          </div>
+
+          {/* Cache Stats */}
+          <div style={{ ...CARD }}>
+            <div style={{ fontSize: 16, fontWeight: 600, color: '#fff', marginBottom: 16 }}>🗄️ Chunk Cache</div>
+            <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+              <StatCard
+                label="Cached Chunks"
+                value={data.cached_chunks || 0}
+                color="#fbbf24"
+              />
+              <StatCard
+                label="Cached Tokens"
+                value={data.cached_chunk_tokens || 0}
+                color="#fb923c"
+              />
+            </div>
+          </div>
+        </>
+      )}
+
+      {!data && !error && (
+        <div style={{ color: '#555', textAlign: 'center', paddingTop: 80, fontSize: 16 }}>Loading...</div>
+      )}
+    </div>
+  )
+}
