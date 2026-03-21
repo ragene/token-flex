@@ -16,7 +16,7 @@ Usage
 
 Configuration
 -------------
-TOKEN_FLOW_UI_URL env var (default: https://token-flow-api.thefreightdawg.com).
+TOKEN_FLOW_UI_URL env var (default: https://token-flow.thefreightdawg.com).
 Snapshot is posted to POST /token-data/push on that base URL.
 """
 from __future__ import annotations
@@ -24,13 +24,22 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sqlite3
 from datetime import datetime
 from typing import Optional
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_UI_URL = "https://token-flow-api.thefreightdawg.com"
+_DEFAULT_UI_URL = "https://token-flow.thefreightdawg.com"
+
+
+def _normalize_db_url(db_path: str) -> str:
+    """Ensure db_path is a proper URL for pg_compat.connect().
+    Raw file paths (e.g. /tmp/foo.db) are wrapped as sqlite:///path.
+    postgresql:// and sqlite:/// URLs are passed through unchanged.
+    """
+    if db_path.startswith(("postgresql://", "postgres://", "sqlite:///")):
+        return db_path
+    return f"sqlite:///{db_path}"
 
 
 # ── Snapshot builder ──────────────────────────────────────────────────────────
@@ -39,8 +48,8 @@ def _build_snapshot(db_path: str) -> dict:
     """Read current state from DB and return a full snapshot dict."""
     from db.schema import init_db
 
-    c = sqlite3.connect(db_path)
-    c.row_factory = sqlite3.Row
+    from db.pg_compat import connect as pg_connect
+    c = pg_connect(_normalize_db_url(db_path))
     init_db(c)
     try:
         # Token usage summary
@@ -146,7 +155,8 @@ def log_pipeline_event(
     """
     try:
         from db.schema import init_db
-        conn = sqlite3.connect(db_path)
+        from db.pg_compat import connect as pg_connect
+        conn = pg_connect(_normalize_db_url(db_path))
         init_db(conn)
         conn.execute(
             "INSERT INTO pipeline_events (event_type, detail) VALUES (?, ?)",
