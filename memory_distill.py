@@ -1,0 +1,557 @@
+#!/usr/bin/env python3
+"""
+Memory distillation skill.
+- Reads session memory files
+- Summarizes using Claude claude-haiku-4-5 via Anthropic API
+- Stores summaries in SQLite with relevance scoring
+- Rebuilds memory context from top-scoring entries
+"""
+import sqlite3
+import os
+import json
+import re
+import argparse
+from datetime import datetime
+from pathlib import Path
+
+DB_PATH = Path(os.environ.get("MEMORY_DB", "/home/ec2-user/.openclaw/workspace/memory/context.db"))
+MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", "/home/ec2-user/.openclaw/workspace/memory"))
+WORKSPACE = Path(os.environ.get("WORKSPACE", "/home/ec2-user/.openclaw/workspace"))
+
+
+def init_db(conn):
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS memory_entries (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_file TEXT NOT NULL,
+            category    TEXT,
+            content     TEXT NOT NULL,
+            summary     TEXT,
+            keywords    TEXT,
+            relevance   REAL DEFAULT 1.0,
+            created_at  TEXT DEFAULT (datetime('now')),
+            last_used   TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_relevance ON memory_entries(relevance DESC);
+        CREATE INDEX IF NOT EXISTS idx_category ON memory_entries(category);
+    """)
+    conn.commit()
+
+
+def summarize_with_claude(text: str, context_hint: str = "") -> dict:
+    """Summarize text using Claude. Returns {summary, keywords, category, relevance}."""
+    try:
+        import anthropic
+        client = anthropic.Anthropic()
+        prompt = f"""Analyze this memory/context entry from a coding assistant session.
+
+Context hint: {context_hint or 'FreightDawg freight dispatch app development'}
+
+Entry:
+{text[:4000]}
+
+Return a JSON object with:
+- summary: 1-2 sentence distilled summary (max 200 chars)
+- keywords: array of 3-6 key terms
+- category: one of [infrastructure, frontend, backend, auth, deployment, feature, fix, config]
+- relevance: float 0.0-1.0 (how important/reusable this context is for future sessions)
+
+Return ONLY valid JSON, no markdown."""
+
+        msg = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        raw = msg.content[0].text.strip()
+        # Strip markdown code blocks if present
+        raw = re.sub(r'^```json?\s*', '', raw)
+        raw = re.sub(r'\s*```$', '', raw)
+        return json.loads(raw)
+    except Exception as e:
+        print(f"Claude summarization failed: {e}")
+        return {
+            "summary": text[:200],
+            "keywords": [],
+            "category": "general",
+            "relevance": 0.5
+        }
+
+
+def ingest_memory_file(conn, filepath: Path, context_hint: str = "") -> int:
+    """Parse memory file into sections and store each in DB."""
+    if not filepath.exists():
+        print(f"File not found: {filepath}")
+        return 0
+
+    content = filepath.read_text()
+    # Split on ## headers
+    sections = re.split(r'\n(?=## )', content)
+    count = 0
+
+    for section in sections:
+        section = section.strip()
+        if len(section) < 20:
+            continue
+
+        import hashlib
+        content_hash = hashlib.md5(section.encode()).hexdigest()
+        existing = conn.execute(
+            "SELECT id FROM memory_entries WHERE keywords LIKE ?",
+            (f'%{content_hash}%',)
+        ).fetchone()
+        if existing:
+            print(f"  Skipping already-ingested section ({content_hash[:8]})")
+            continue
+
+        print(f"  Summarizing section ({len(section)} chars)...")
+        result = summarize_with_claude(section, context_hint=context_hint)
+
+        conn.execute("""
+            INSERT INTO memory_entries (source_file, category, content, summary, keywords, relevance)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            str(filepath.name),
+            result.get("category", "general"),
+            section,
+            result.get("summary", section[:200]),
+            json.dumps(result.get("keywords", []) + [content_hash]),
+            float(result.get("relevance", 0.5))
+        ))
+        count += 1
+
+    conn.commit()
+    print(f"  Ingested {count} new entries from {filepath.name}")
+    return count
+
+
+def query_context(conn, top_n: int = 20, min_relevance: float = 0.5) -> list:
+    """Query top-N most relevant memory entries."""
+    rows = conn.execute("""
+        SELECT category, summary, content, relevance, keywords
+        FROM memory_entries
+        WHERE relevance >= ?
+        ORDER BY relevance DESC, last_used DESC NULLS LAST
+        LIMIT ?
+    """, (min_relevance, top_n)).fetchall()
+    return rows
+
+
+def rebuild_memory(conn, output_path: Path, top_n: int = 20):
+    """Rebuild memory file from top-scoring DB entries."""
+    rows = query_context(conn, top_n=top_n)
+    if not rows:
+        print("No entries found in DB — nothing to rebuild.")
+        return
+
+    by_category = {}
+    for category, summary, content, relevance, keywords in rows:
+        by_category.setdefault(category, []).append({
+            "summary": summary,
+            "content": content,
+            "relevance": relevance,
+            "keywords": json.loads(keywords) if keywords else []
+        })
+
+    lines = [f"# Memory — Rebuilt {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} (from context.db)\n"]
+    lines.append(f"*Top {len(rows)} entries by relevance score*\n")
+
+    for cat, entries in sorted(by_category.items()):
+        lines.append(f"\n## {cat.upper()}\n")
+        for e in sorted(entries, key=lambda x: x['relevance'], reverse=True):
+            score = f"[score: {e['relevance']:.2f}]"
+            # Filter out MD5 hashes (32-char hex) from displayed keywords
+            kw = ', '.join([k for k in e['keywords'] if len(k) < 30 and len(k) != 32][:5])
+            lines.append(f"**{score}** {e['summary']}")
+            if kw:
+                lines.append(f"*Keywords: {kw}*")
+            lines.append("")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text('\n'.join(lines))
+    print(f"Rebuilt memory written to {output_path} ({len(rows)} entries)")
+
+    conn.execute("UPDATE memory_entries SET last_used = datetime('now') WHERE relevance >= 0.5")
+    conn.commit()
+
+
+
+def _extract_messages_openclaw(lines: list) -> list:
+    """Extract messages from OpenClaw .jsonl format (type=message entries).
+
+    Supports both v2 (role/content at top level) and v3 (role/content nested
+    under a 'message' key) formats.
+    """
+    messages = []
+    for line in lines:
+        try:
+            obj = json.loads(line)
+            if obj.get("type") != "message":
+                continue
+            # v3: content nested under obj["message"]
+            msg = obj.get("message", obj)
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                text = " ".join(
+                    p.get("text", "") for p in content
+                    if isinstance(p, dict) and p.get("type") == "text"
+                )
+            elif isinstance(content, str):
+                text = content
+            else:
+                continue
+            if text.strip():
+                messages.append((role.upper(), text.strip()[:500]))
+        except Exception:
+            continue
+    return messages
+
+
+def _extract_messages_claude_cli(lines: list) -> list:
+    """
+    Extract messages from claude CLI .jsonl format.
+    Claude Code CLI stores sessions at ~/.claude/projects/<hash>/conversation.jsonl
+    Each line is a JSON object with role + content fields (similar to Anthropic API format).
+    Also handles the older ~/.claude/conversations/<id>.jsonl format.
+    """
+    messages = []
+    for line in lines:
+        try:
+            obj = json.loads(line)
+            # Direct message format (Anthropic API-style)
+            role = obj.get("role", "")
+            if role in ("user", "assistant", "human"):
+                content = obj.get("content", obj.get("text", ""))
+                if isinstance(content, list):
+                    text = " ".join(
+                        p.get("text", "") for p in content
+                        if isinstance(p, dict) and p.get("type") == "text"
+                    )
+                elif isinstance(content, str):
+                    text = content
+                else:
+                    continue
+                if text.strip():
+                    display_role = "USER" if role in ("user", "human") else "ASSISTANT"
+                    messages.append((display_role, text.strip()[:500]))
+            # Claude Code tool-use / result entries
+            elif obj.get("type") in ("tool_use", "tool_result"):
+                tool = obj.get("name", obj.get("tool_name", "tool"))
+                inp = obj.get("input", obj.get("content", ""))
+                if isinstance(inp, dict):
+                    inp = json.dumps(inp)[:200]
+                if inp:
+                    messages.append(("TOOL", f"{tool}: {str(inp)[:300]}"))
+        except Exception:
+            continue
+    return messages
+
+
+def ingest_git_history(conn, workspace: Path, context_hint: str = "", since: str = "24 hours ago") -> int:
+    """
+    Summarize today's git commit history from workspace and store in DB.
+    Deduplicates by hashing the raw log output so re-runs are safe.
+    Returns 1 if a new entry was added, 0 if already ingested or no commits found.
+    """
+    import subprocess
+    import hashlib
+
+    try:
+        # Full log with file-change stats for richer context
+        result = subprocess.run(
+            ["git", "-C", str(workspace), "log",
+             f"--since={since}",
+             "--pretty=format:commit %h  %ai  %s",
+             "--stat",
+             "--no-merges"],
+            capture_output=True, text=True, timeout=15
+        )
+        log_output = result.stdout.strip()
+    except Exception as e:
+        print(f"  git log failed: {e}")
+        return 0
+
+    if not log_output:
+        print(f"  No commits found in workspace since '{since}'")
+        return 0
+
+    content_hash = hashlib.md5(log_output.encode()).hexdigest()
+    existing = conn.execute(
+        "SELECT id FROM memory_entries WHERE keywords LIKE ?",
+        (f'%{content_hash}%',)
+    ).fetchone()
+    if existing:
+        print(f"  Git history already ingested (hash {content_hash[:8]})")
+        return 0
+
+    # Also grab a compact one-liner list for the summary prompt
+    try:
+        oneliner = subprocess.run(
+            ["git", "-C", str(workspace), "log",
+             f"--since={since}",
+             "--oneline", "--no-merges"],
+            capture_output=True, text=True, timeout=10
+        ).stdout.strip()
+    except Exception:
+        oneliner = ""
+
+    num_commits = len([l for l in oneliner.splitlines() if l.strip()])
+    full_text = (
+        f"Git commit history for workspace ({since}):\n"
+        f"Total commits: {num_commits}\n\n"
+        f"## Commit list\n{oneliner}\n\n"
+        f"## Detailed log\n{log_output[:6000]}"
+    )
+
+    hint = context_hint or "FreightDawg SoCal freight dispatch app development on AWS ECS"
+    prompt_extra = (
+        "This is a git commit log. Weight it highly — it is a concrete record of what changed today. "
+        "Summarize the key themes/areas of work (features, fixes, infra, etc.). "
+        "Set relevance >= 0.88 since commit history is high-value coding context."
+    )
+
+    print(f"  Summarizing git history ({num_commits} commits since '{since}')...")
+
+    try:
+        import anthropic
+        client = anthropic.Anthropic()
+        prompt = f"""Analyze this git commit history from a coding assistant workspace.
+
+Context: {hint}
+{prompt_extra}
+
+{full_text[:5000]}
+
+Return a JSON object with:
+- summary: 1-2 sentence distilled summary of today's work themes (max 250 chars)
+- keywords: array of 4-8 key terms (feature names, files touched, fix areas)
+- category: one of [infrastructure, frontend, backend, auth, deployment, feature, fix, config]
+- relevance: float 0.0-1.0 (should be >= 0.88 for commit history)
+
+Return ONLY valid JSON, no markdown."""
+
+        msg = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=350,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        raw = msg.content[0].text.strip()
+        raw = re.sub(r'^```json?\s*', '', raw)
+        raw = re.sub(r'\s*```$', '', raw)
+        result_json = json.loads(raw)
+    except Exception as e:
+        print(f"  Claude summarization failed: {e}")
+        result_json = {
+            "summary": f"Git history: {num_commits} commits today — {oneliner[:200]}",
+            "keywords": ["git-history", "daily-commits"],
+            "category": "feature",
+            "relevance": 0.88
+        }
+
+    # Enforce minimum relevance for commit history
+    relevance = max(float(result_json.get("relevance", 0.88)), 0.88)
+
+    conn.execute("""
+        INSERT INTO memory_entries (source_file, category, content, summary, keywords, relevance)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (
+        f"git-history:{since}",
+        result_json.get("category", "feature"),
+        full_text[:8000],
+        result_json.get("summary", full_text[:250]),
+        json.dumps(result_json.get("keywords", []) + [content_hash, "git-history"]),
+        relevance,
+    ))
+    conn.commit()
+    print(f"  ✅ Ingested git history: {num_commits} commits, relevance={relevance:.2f}")
+    return 1
+
+
+def ingest_session_file(conn, filepath: Path, context_hint: str = "") -> int:
+    """
+    Parse a session transcript (.jsonl) and ingest as a summarized DB entry.
+    Supports:
+      - OpenClaw agent sessions (type=message entries)
+      - Claude CLI sessions (role=user/assistant, ~/.claude/projects/ or ~/.claude/conversations/)
+    """
+    if not filepath.exists():
+        print(f"Session file not found: {filepath}")
+        return 0
+
+    import hashlib
+    content_hash = hashlib.md5(filepath.read_bytes()).hexdigest()
+    existing = conn.execute(
+        "SELECT id FROM memory_entries WHERE keywords LIKE ?",
+        (f'%{content_hash}%',)
+    ).fetchone()
+    if existing:
+        print(f"  Already ingested: {filepath.name}")
+        return 0
+
+    try:
+        raw_lines = [l.strip() for l in filepath.read_text(errors="ignore").splitlines() if l.strip()]
+    except Exception as e:
+        print(f"  Error reading {filepath.name}: {e}")
+        return 0
+
+    # Auto-detect format: OpenClaw has type=session as first line
+    is_openclaw = False
+    try:
+        first = json.loads(raw_lines[0]) if raw_lines else {}
+        is_openclaw = first.get("type") == "session"
+    except Exception:
+        pass
+
+    if is_openclaw:
+        pairs = _extract_messages_openclaw(raw_lines)
+        source_label = "OpenClaw"
+    else:
+        pairs = _extract_messages_claude_cli(raw_lines)
+        source_label = "claude-cli"
+
+    if not pairs:
+        print(f"  No messages found in {filepath.name} (tried both OpenClaw + claude-cli formats)")
+        return 0
+
+    messages = [f"{r}: {t}" for r, t in pairs]
+
+    # Representative excerpt: first 6 turns + last 4 turns
+    excerpt = "\n".join(messages[:6] + (["[...]"] if len(messages) > 10 else []) + messages[-4:])
+    full_text = (
+        f"Session transcript ({source_label}): {filepath.name}\n"
+        f"Total turns: {len(messages)}\n\n"
+        f"{excerpt}"
+    )
+
+    hint = context_hint or f"{source_label} agent session history — FreightDawg SoCal freight dispatch"
+    print(f"  Summarizing {source_label} session ({len(messages)} turns)...")
+    result = summarize_with_claude(full_text, context_hint=hint)
+
+    conn.execute("""
+        INSERT INTO memory_entries (source_file, category, content, summary, keywords, relevance)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (
+        filepath.name,
+        result.get("category", "feature"),
+        full_text[:8000],
+        result.get("summary", full_text[:200]),
+        json.dumps(result.get("keywords", []) + [content_hash, source_label]),
+        float(result.get("relevance", 0.7)),
+    ))
+    conn.commit()
+    print(f"  ✅ Ingested {source_label} session: {filepath.name} ({len(messages)} turns, relevance={result.get('relevance', 0.7):.2f})")
+    return 1
+
+
+def _find_claude_cli_sessions() -> list:
+    """
+    Auto-discover claude CLI session files from well-known paths:
+    - ~/.claude/projects/*/conversation.jsonl  (Claude Code / new claude CLI)
+    - ~/.claude/conversations/*.jsonl           (older claude CLI format)
+    Also reads CLAUDE_SESSIONS_DIR env var as an additional source root.
+    Returns a deduplicated list of Path objects.
+    """
+    found = []
+    home = Path.home()
+
+    # New claude CLI / Claude Code format
+    found.extend(home.glob(".claude/projects/*/conversation.jsonl"))
+    # Older claude CLI format
+    found.extend(home.glob(".claude/conversations/*.jsonl"))
+
+    # Optional env-var override (root dir)
+    claude_root_env = os.environ.get("CLAUDE_SESSIONS_DIR", "")
+    if claude_root_env:
+        root = Path(claude_root_env)
+        found.extend(root.glob("projects/*/conversation.jsonl"))
+        found.extend(root.glob("conversations/*.jsonl"))
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique = []
+    for f in found:
+        if f not in seen:
+            seen.add(f)
+            unique.append(f)
+    return unique
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Memory distillation skill")
+    parser.add_argument("action", choices=["ingest", "rebuild", "query", "full"],
+                        help="ingest: load files into DB | rebuild: write distilled context | "
+                             "full: ingest+clear+rebuild | query: print top entries")
+    parser.add_argument("--file", help="Specific memory file to ingest (default: all *.md in MEMORY_DIR)")
+    parser.add_argument("--output", default=str(WORKSPACE / "memory" / "2026-03-20.md"),
+                        help="Output memory file path for rebuild")
+    parser.add_argument("--top", type=int, default=20, help="Top N entries to include in rebuild")
+    parser.add_argument("--min-relevance", type=float, default=0.5, help="Minimum relevance threshold")
+    parser.add_argument("--clear", action="store_true", help="Clear source file(s) after ingest")
+    parser.add_argument("--context-hint", default="FreightDawg SoCal freight dispatch app on AWS ECS",
+                        help="Context hint passed to Claude for better categorization")
+    parser.add_argument("--git-since", default=None,
+                        help="Git history window (default: GIT_SINCE env or '24 hours ago')")
+    parser.add_argument("--claude-sessions-dir", default=None,
+                        help="Additional directory to scan for claude CLI .jsonl session files")
+    args = parser.parse_args()
+
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    init_db(conn)
+
+    if args.action in ("ingest", "full"):
+        # Ingest markdown memory files
+        md_files = [Path(args.file)] if args.file else list(MEMORY_DIR.glob("*.md"))
+        for f in md_files:
+            if f.suffix != ".md":
+                continue
+            print(f"Ingesting memory file: {f.name}...")
+            ingest_memory_file(conn, f, context_hint=args.context_hint)
+            if args.clear or args.action == "full":
+                f.write_text(
+                    f"# Memory — {f.stem}\n\n"
+                    f"*Cleared after distillation on {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}.*\n"
+                    f"*Context stored in context.db — rebuilt below.*\n"
+                )
+                print(f"  Cleared {f.name}")
+
+        # Ingest today's git commit history from workspace
+        git_since = args.git_since or os.environ.get("GIT_SINCE", "24 hours ago")
+        print(f"\nIngesting git history from {WORKSPACE} (since '{git_since}')...")
+        ingest_git_history(conn, WORKSPACE, context_hint=args.context_hint, since=git_since)
+
+        # Ingest OpenClaw session transcripts (.jsonl) if sessions_dir is set
+        sessions_dir = Path(os.environ.get("SESSIONS_DIR", ""))
+        if sessions_dir.exists():
+            jsonl_files = list(sessions_dir.glob("*.jsonl"))
+            print(f"\nIngesting {len(jsonl_files)} session transcript(s) from {sessions_dir}...")
+            for f in jsonl_files:
+                ingest_session_file(conn, f, context_hint=args.context_hint)
+
+        # Ingest claude CLI session transcripts (auto-discovered)
+        claude_cli_files = _find_claude_cli_sessions()
+        if args.claude_sessions_dir:
+            extra_dir = Path(args.claude_sessions_dir)
+            if extra_dir.exists():
+                claude_cli_files += list(extra_dir.glob("*.jsonl"))
+        if claude_cli_files:
+            print(f"\nIngesting {len(claude_cli_files)} claude CLI session(s)...")
+            for f in claude_cli_files:
+                ingest_session_file(conn, f, context_hint=args.context_hint)
+
+    if args.action in ("rebuild", "full"):
+        rebuild_memory(conn, Path(args.output), top_n=args.top)
+
+    if args.action == "query":
+        rows = query_context(conn, top_n=args.top, min_relevance=args.min_relevance)
+        if not rows:
+            print("No entries found.")
+        for cat, summary, _, relevance, _ in rows:
+            print(f"[{relevance:.2f}] {cat}: {summary}")
+
+    conn.close()
+
+
+if __name__ == "__main__":
+    main()
