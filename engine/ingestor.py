@@ -71,6 +71,45 @@ Return ONLY valid JSON, no markdown."""
 # Chunk pipeline helper
 # ---------------------------------------------------------------------------
 
+def _run_chunk_pipeline_raw(conn: sqlite3.Connection, source_label: str, content: str,
+                             context_hint: str = "") -> int:
+    """
+    Chunk + score raw file content directly into chunk_cache without a memory_entries row.
+    Used to chunk live session .jsonl and memory .md files before they are cleared.
+    Returns number of chunks created.
+    """
+    from engine.chunker import chunk_text
+    from engine.scorer import score_chunks
+
+    chunks = chunk_text(content)
+    if not chunks:
+        return 0
+
+    scored = score_chunks(chunks, context_hint=context_hint)
+
+    for chunk in scored:
+        conn.execute(
+            """
+            INSERT INTO chunk_cache
+                (source_id, source_label, chunk_index, content, token_count,
+                 fact_score, preference_score, intent_score, composite_score)
+            VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                source_label,
+                chunk["chunk_index"],
+                chunk["content"],
+                chunk.get("token_count", 0),
+                chunk.get("fact_score", 0.0),
+                chunk.get("preference_score", 0.0),
+                chunk.get("intent_score", 0.0),
+                chunk.get("composite_score", 0.0),
+            ),
+        )
+    conn.commit()
+    return len(scored)
+
+
 def _run_chunk_pipeline(conn: sqlite3.Connection, memory_entry_id: int, content: str) -> int:
     """
     Run chunk → score → persist for the given memory entry content.

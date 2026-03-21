@@ -30,6 +30,7 @@ from engine.ingestor import (
     ingest_session_file,
     query_context,
     rebuild_memory,
+    _run_chunk_pipeline_raw,
 )
 
 router = APIRouter(tags=["memory"])
@@ -129,6 +130,7 @@ class FullCycleResult(BaseModel):
     md_files_ingested: int
     git_ingested: int
     sessions_ingested: int
+    raw_file_chunks: int
     total_chunks: int
     db_entries: int
     safety_gate_passed: bool
@@ -309,6 +311,7 @@ async def full_cycle(body: FullCycleRequest, request: Request) -> FullCycleResul
 
         md_cleared = 0
         sessions_cleared = 0
+        raw_file_chunks = 0
         pruned = 0
         chunks_remaining = 0
         rebuilt_to: Optional[str] = None
@@ -328,7 +331,34 @@ async def full_cycle(body: FullCycleRequest, request: Request) -> FullCycleResul
                     rebuilt_to=None,
                 )
 
-            # --- Step 3: Clear ---
+            # --- Step 3: Chunk raw files before clearing ---
+            # Chunk the live session .jsonl files and today's memory .md directly
+            # so their full content is scored and stored before being wiped.
+            openclaw_raw = _find_openclaw_sessions()
+            for sf in openclaw_raw:
+                try:
+                    text = sf.read_text(errors="ignore")
+                    if text.strip():
+                        raw_file_chunks += _run_chunk_pipeline_raw(
+                            conn, sf.name, text, context_hint=body.context_hint
+                        )
+                except Exception:
+                    pass
+
+            today_md = memory_dir / f"{datetime.utcnow().strftime('%Y-%m-%d')}.md"
+            if today_md.exists():
+                try:
+                    text = today_md.read_text(errors="ignore")
+                    if text.strip():
+                        raw_file_chunks += _run_chunk_pipeline_raw(
+                            conn, today_md.name, text, context_hint=body.context_hint
+                        )
+                except Exception:
+                    pass
+
+            total_chunks += raw_file_chunks
+
+            # --- Step 4: Clear ---
             for f in md_files_ingested:
                 _clear_md_file(f)
                 md_cleared += 1
@@ -358,6 +388,7 @@ async def full_cycle(body: FullCycleRequest, request: Request) -> FullCycleResul
         md_files_ingested=total_md,
         git_ingested=total_git,
         sessions_ingested=total_sessions,
+        raw_file_chunks=raw_file_chunks,
         total_chunks=total_chunks,
         db_entries=db_count,
         safety_gate_passed=safety_passed,
