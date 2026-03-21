@@ -29,6 +29,7 @@ class WSManager:
 
     def __init__(self) -> None:
         self._clients: set[WebSocket] = set()
+        self.last_snapshot: dict | None = None  # cache of last pushed snapshot
 
     async def connect(self, ws: WebSocket) -> None:
         await ws.accept()
@@ -42,8 +43,10 @@ class WSManager:
     async def broadcast(self, data: dict) -> None:
         """Send a JSON-serialised snapshot to every connected client.
 
+        Caches the snapshot so new connections receive it on connect.
         Dead connections are silently pruned.
         """
+        self.last_snapshot = data
         if not self._clients:
             return
         msg = json.dumps(data, default=lambda o: o.isoformat() if isinstance(o, datetime) else str(o))
@@ -54,6 +57,14 @@ class WSManager:
             except Exception:
                 dead.add(ws)
         self._clients -= dead
+
+    async def send_initial(self, ws: WebSocket, fallback: dict) -> None:
+        """Send the last cached snapshot to a newly connected client.
+        Falls back to the provided dict (DB snapshot) if no push has arrived yet.
+        """
+        snapshot = self.last_snapshot if self.last_snapshot is not None else fallback
+        msg = json.dumps(snapshot, default=lambda o: o.isoformat() if isinstance(o, datetime) else str(o))
+        await ws.send_text(msg)
 
     @property
     def connection_count(self) -> int:

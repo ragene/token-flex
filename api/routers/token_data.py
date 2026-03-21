@@ -215,15 +215,15 @@ async def token_data_ws(websocket: WebSocket) -> None:
     database_url: str = websocket.app.state.database_url
     await ws_manager.connect(websocket)
     try:
-        # Send initial snapshot immediately on connect
-        snapshot = _build_snapshot(database_url)
-        await websocket.send_text(_json.dumps(snapshot, default=_json_default))
+        # On connect: send last pushed snapshot if available, else fall back to DB read
+        fallback = _build_snapshot(database_url)
+        await ws_manager.send_initial(websocket, fallback)
 
-        # Keep the connection alive; respond to any client message with a fresh snapshot
+        # Keep the connection alive; respond to any client message with the latest snapshot
         while True:
             try:
                 _ = await websocket.receive_text()
-                snapshot = _build_snapshot(db_path)
+                snapshot = ws_manager.last_snapshot or _build_snapshot(database_url)
                 await websocket.send_text(_json.dumps(snapshot, default=_json_default))
             except WebSocketDisconnect:
                 break
