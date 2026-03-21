@@ -474,11 +474,107 @@ def _find_claude_cli_sessions() -> list:
     return unique
 
 
+def run_distill_and_clear(args_ns):
+    """
+    Run a full ingest+rebuild cycle then clear token_usage via the token-flow API.
+    Called by the SQS poller on each trigger message.
+    """
+    import subprocess, sys
+
+    cmd = [sys.executable, __file__, "full",
+           "--output", args_ns.output,
+           "--context-hint", args_ns.context_hint,
+           "--top", str(args_ns.top)]
+    if args_ns.git_since:
+        cmd += ["--git-since", args_ns.git_since]
+    print(f"  Running: {' '.join(cmd)}")
+    result = subprocess.run(cmd)
+    if result.returncode != 0:
+        print(f"  ⚠️  Distill subprocess exited with code {result.returncode}")
+
+    # Call DELETE /token-data/clear on the token-flow service
+    api_url = os.environ.get("TOKEN_FLOW_API_URL", "http://localhost:8001")
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            f"{api_url}/token-data/clear",
+            method="DELETE",
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            body = r.read().decode()
+            print(f"  ✅ token_usage cleared: {body}")
+    except Exception as e:
+        print(f"  ⚠️  Could not clear token_usage via API: {e}")
+
+
+def poll_sqs(args_ns):
+    """
+    Long-poll SQS for distill+clear trigger messages. Runs forever (daemon mode).
+
+    Required env vars:
+      MEMORY_DISTILL_QUEUE_URL  — SQS queue URL
+      TOKEN_FLOW_API_URL        — token-flow service base URL (default: http://localhost:8001)
+      AWS_REGION                — defaults to us-west-2
+    """
+    import boto3
+
+    queue_url = os.environ.get(
+        "MEMORY_DISTILL_QUEUE_URL",
+        "https://sqs.us-west-2.amazonaws.com/531948420901/freightdawg-memory-distill",
+    )
+    region = os.environ.get("AWS_REGION", "us-west-2")
+    sqs = boto3.client("sqs", region_name=region)
+
+    print(f"[SQS poller] Listening on {queue_url} (region={region})")
+
+    while True:
+        try:
+            resp = sqs.receive_message(
+                QueueUrl=queue_url,
+                MaxNumberOfMessages=1,
+                WaitTimeSeconds=20,
+                VisibilityTimeout=300,
+            )
+            messages = resp.get("Messages", [])
+            if not messages:
+                continue
+
+            msg = messages[0]
+            receipt = msg["ReceiptHandle"]
+
+            try:
+                body = json.loads(msg["Body"])
+                action = body.get("action", "")
+                print(f"[SQS poller] Received: action={action} at {body.get('requested_at','?')}")
+            except Exception as e:
+                print(f"[SQS poller] Bad message body: {e} — deleting")
+                sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt)
+                continue
+
+            if action == "distill_and_clear":
+                print("[SQS poller] Starting distill+clear...")
+                try:
+                    run_distill_and_clear(args_ns)
+                    print("[SQS poller] ✅ distill+clear complete")
+                except Exception as e:
+                    print(f"[SQS poller] ⚠️  distill+clear failed: {e}")
+
+            sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt)
+
+        except KeyboardInterrupt:
+            print("\n[SQS poller] Stopped.")
+            break
+        except Exception as e:
+            print(f"[SQS poller] Error: {e} — retrying in 5s")
+            import time; time.sleep(5)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Memory distillation skill")
-    parser.add_argument("action", choices=["ingest", "rebuild", "query", "full"],
+    parser.add_argument("action", choices=["ingest", "rebuild", "query", "full", "poll-sqs"],
                         help="ingest: load files into DB | rebuild: write distilled context | "
-                             "full: ingest+clear+rebuild | query: print top entries")
+                             "full: ingest+clear+rebuild | query: print top entries | "
+                             "poll-sqs: daemon — long-poll SQS for distill+clear triggers")
     parser.add_argument("--file", help="Specific memory file to ingest (default: all *.md in MEMORY_DIR)")
     parser.add_argument("--output", default=str(WORKSPACE / "memory" / "2026-03-20.md"),
                         help="Output memory file path for rebuild")
@@ -546,6 +642,11 @@ def main():
             print("No entries found.")
         for cat, summary, _, relevance, _ in rows:
             print(f"[{relevance:.2f}] {cat}: {summary}")
+
+    if args.action == "poll-sqs":
+        conn.close()
+        poll_sqs(args)
+        return
 
     conn.close()
 

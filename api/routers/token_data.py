@@ -3,13 +3,15 @@ Token-data router — exposes local token_usage records to token-flow-ui.
 
 Routes
 ------
-  WS   /token-data/ws      — WebSocket: pushes snapshot on connect, then on every new record
-  GET  /token-data/summary — aggregated usage by (operation, model)
-  GET  /token-data/events  — raw event rows with optional filters
-  GET  /token-data/export  — CSV download of all rows
-  POST /token-data/record  — write a single usage row + broadcast snapshot to WS clients
-  POST /token-data/push    — receive a snapshot pushed from the local token-flow client
-                             and broadcast it to all connected WS clients
+  WS     /token-data/ws      — WebSocket: pushes snapshot on connect, then on every new record
+  GET    /token-data/summary — aggregated usage by (operation, model)
+  GET    /token-data/events  — raw event rows with optional filters
+  GET    /token-data/export  — CSV download of all rows
+  POST   /token-data/record  — write a single usage row + broadcast snapshot to WS clients
+  POST   /token-data/push    — receive a snapshot pushed from the local token-flow client
+                               and broadcast it to all connected WS clients
+  POST   /token-data/distill — publish distill+clear trigger to SQS queue
+  DELETE /token-data/clear   — wipe all token_usage rows
 """
 from __future__ import annotations
 
@@ -17,6 +19,7 @@ import csv
 import io
 import json as _json
 import logging
+import os
 from datetime import datetime
 from typing import List, Optional
 
@@ -427,6 +430,68 @@ async def export_csv(request: Request) -> StreamingResponse:
         media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
+
+
+# ── Distill trigger endpoint ──────────────────────────────────────────────────
+
+SQS_QUEUE_URL = os.environ.get(
+    "MEMORY_DISTILL_QUEUE_URL",
+    "https://sqs.us-west-2.amazonaws.com/531948420901/freightdawg-memory-distill",
+)
+AWS_REGION = os.environ.get("AWS_REGION", "us-west-2")
+
+
+@router.post("/token-data/distill", status_code=202)
+async def trigger_distill(request: Request) -> dict:
+    """
+    Publish a distill_and_clear message to the SQS queue.
+    The local smart-memory service polls this queue and runs memory_distill.py full + clears token_usage.
+    """
+    try:
+        import boto3
+        from botocore.exceptions import ClientError
+        sqs = boto3.client("sqs", region_name=AWS_REGION)
+        message = {
+            "action": "distill_and_clear",
+            "requested_at": datetime.utcnow().isoformat(),
+        }
+        resp = sqs.send_message(
+            QueueUrl=SQS_QUEUE_URL,
+            MessageBody=_json.dumps(message),
+        )
+        log.info("Distill trigger sent to SQS (MessageId=%s)", resp.get("MessageId"))
+        return {
+            "status": "queued",
+            "message_id": resp.get("MessageId"),
+            "requested_at": message["requested_at"],
+        }
+    except Exception as exc:
+        log.error("SQS send_message failed: %s", exc)
+        from fastapi import HTTPException
+        raise HTTPException(status_code=502, detail=f"SQS error: {exc}")
+
+
+@router.delete("/token-data/clear", status_code=200)
+async def clear_token_usage(request: Request) -> dict:
+    """
+    Delete all token_usage rows. Called by the local service after distillation completes,
+    or manually from the dashboard.
+    """
+    conn = _conn(request)
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM token_usage").fetchone()[0]
+        conn.execute("DELETE FROM token_usage")
+        conn.commit()
+        log.info("Cleared %d token_usage rows", count)
+    finally:
+        conn.close()
+
+    # Push empty snapshot to all WS clients
+    database_url: str = request.app.state.database_url
+    snapshot = _build_snapshot(database_url)
+    await ws_manager.broadcast(snapshot)
+
+    return {"status": "cleared", "rows_deleted": count}
 
 
 # ── Internal helper ───────────────────────────────────────────────────────────
