@@ -16,6 +16,7 @@ from __future__ import annotations
 import csv
 import io
 import json as _json
+import logging
 from datetime import datetime
 from typing import List, Optional
 
@@ -40,11 +41,30 @@ def _json_default(obj):
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+log = logging.getLogger(__name__)
+
+
 def _conn(request: Request):
     database_url: str = request.app.state.database_url
     c = pg_connect(database_url)
     init_db(c)
     return c
+
+
+def _load_push_cache(database_url: str) -> dict | None:
+    """Load the last persisted push snapshot from push_cache. Returns None if empty."""
+    try:
+        c = pg_connect(database_url)
+        init_db(c)
+        try:
+            row = c.execute("SELECT payload FROM push_cache WHERE id = 1").fetchone()
+            if row:
+                return _json.loads(row[0])
+        finally:
+            c.close()
+    except Exception as exc:
+        log.debug("_load_push_cache failed (non-fatal): %s", exc)
+    return None
 
 
 def _build_snapshot(database_url: str) -> dict:
@@ -215,9 +235,14 @@ async def token_data_ws(websocket: WebSocket) -> None:
     database_url: str = websocket.app.state.database_url
     await ws_manager.connect(websocket)
     try:
-        # On connect: send last pushed snapshot if available, else fall back to DB read
-        fallback = _build_snapshot(database_url)
-        await ws_manager.send_initial(websocket, fallback)
+        # On connect: use in-memory cache → push_cache DB → empty DB snapshot (priority order)
+        if ws_manager.last_snapshot is not None:
+            initial = ws_manager.last_snapshot
+        else:
+            initial = _load_push_cache(database_url) or _build_snapshot(database_url)
+            if initial:
+                ws_manager.last_snapshot = initial  # warm the in-memory cache
+        await ws_manager.send_initial(websocket, initial)
 
         # Keep the connection alive; respond to any client message with the latest snapshot
         while True:
@@ -234,17 +259,31 @@ async def token_data_ws(websocket: WebSocket) -> None:
 # ── Push endpoint (called by local token-flow client) ─────────────────────────
 
 @router.post("/token-data/push", status_code=200)
-async def push_snapshot(body: PushSnapshotIn) -> dict:
+async def push_snapshot(body: PushSnapshotIn, request: Request) -> dict:
     """
-    Receive a snapshot from the local token-flow client and broadcast it
-    to all connected WebSocket (UI) clients.
-
-    If no WS clients are connected the push is a no-op (data is still
-    readable via /token-data/summary and /token-data/events).
+    Receive a snapshot from the local token-flow client, persist it to
+    push_cache (survives restarts), and broadcast to all connected WS clients.
     """
     payload = body.model_dump(exclude_none=False)
     if not payload.get("ts"):
         payload["ts"] = datetime.utcnow().isoformat() + "Z"
+
+    # Persist to DB so new WS connections get real data after ECS restarts
+    try:
+        database_url: str = request.app.state.database_url
+        conn = _conn(request)
+        try:
+            conn.execute(
+                """INSERT INTO push_cache (id, payload, updated_at)
+                   VALUES (1, ?, NOW())
+                   ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()""",
+                (_json.dumps(payload),),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:
+        log.debug("push_cache persist failed (non-fatal): %s", exc)
 
     await ws_manager.broadcast(payload)
     return {"ok": True, "clients_notified": ws_manager.connection_count}
