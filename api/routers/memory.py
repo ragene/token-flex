@@ -1,18 +1,21 @@
 """
 api/routers/memory.py — Smart-memory operations exposed as REST endpoints.
 
-Routes (all prefixed /memory/ in this router):
+Routes:
   POST /memory/ingest/file
   POST /memory/ingest/git
   POST /memory/ingest/session
   POST /memory/ingest/auto
+  POST /memory/full          ← full cycle: ingest → safety gate → clear → rebuild
   GET  /memory/query
   POST /memory/rebuild
 """
 from __future__ import annotations
 
+import json as _json
 import os
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
@@ -42,6 +45,39 @@ def _get_conn(request: Request) -> sqlite3.Connection:
     return conn
 
 
+def _db_entry_count(conn: sqlite3.Connection) -> int:
+    return conn.execute("SELECT COUNT(*) FROM memory_entries").fetchone()[0]
+
+
+def _clear_md_file(f: Path) -> None:
+    """Overwrite a markdown memory file with a cleared placeholder."""
+    f.write_text(
+        f"# Memory — {f.stem}\n\n"
+        f"*Cleared after distillation on "
+        f"{datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}.*\n"
+        f"*Context stored in token-flow DB — rebuilt below.*\n"
+    )
+
+
+def _clear_session_file(f: Path) -> None:
+    """Zero out a .jsonl session file after it's been ingested."""
+    try:
+        f.write_text("")
+    except Exception:
+        pass
+
+
+def _find_openclaw_sessions() -> list[Path]:
+    """Find OpenClaw .jsonl session files from SESSIONS_DIR env."""
+    sessions_dir = os.environ.get("SESSIONS_DIR", "")
+    if not sessions_dir:
+        return []
+    root = Path(sessions_dir)
+    if not root.exists():
+        return []
+    return list(root.glob("*.jsonl"))
+
+
 # ---------------------------------------------------------------------------
 # Request / Response models
 # ---------------------------------------------------------------------------
@@ -69,6 +105,14 @@ class IngestAutoRequest(BaseModel):
     clear_after: bool = False
 
 
+class FullCycleRequest(BaseModel):
+    context_hint: str = ""
+    since: str = "24 hours ago"
+    rebuild_output: Optional[str] = None   # path to write rebuilt markdown; defaults to today's memory file
+    top_n: int = 20
+    dry_run: bool = False                  # if True, ingest but skip clearing and rebuild
+
+
 class IngestResult(BaseModel):
     ingested: int
     chunks_created: int
@@ -79,6 +123,18 @@ class IngestAutoResult(BaseModel):
     git: int
     sessions: int
     total_chunks: int
+
+
+class FullCycleResult(BaseModel):
+    md_files_ingested: int
+    git_ingested: int
+    sessions_ingested: int
+    total_chunks: int
+    db_entries: int
+    safety_gate_passed: bool
+    md_files_cleared: int
+    session_files_cleared: int
+    rebuilt_to: Optional[str]
 
 
 class MemoryEntry(BaseModel):
@@ -104,7 +160,6 @@ class RebuildResult(BaseModel):
 
 @router.post("/memory/ingest/file", response_model=IngestResult)
 async def ingest_file(body: IngestFileRequest, request: Request) -> IngestResult:
-    """Ingest a markdown memory file, summarize sections, and chunk them."""
     filepath = Path(body.path)
     if not filepath.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {body.path}")
@@ -112,13 +167,8 @@ async def ingest_file(body: IngestFileRequest, request: Request) -> IngestResult
     conn = _get_conn(request)
     try:
         if body.clear:
-            # Clear existing entries for this source before re-ingesting
-            conn.execute(
-                "DELETE FROM memory_entries WHERE source_file = ?",
-                (filepath.name,),
-            )
+            conn.execute("DELETE FROM memory_entries WHERE source_file = ?", (filepath.name,))
             conn.commit()
-
         ingested, chunks = ingest_memory_file(conn, filepath, context_hint=body.context_hint)
     finally:
         conn.close()
@@ -128,7 +178,6 @@ async def ingest_file(body: IngestFileRequest, request: Request) -> IngestResult
 
 @router.post("/memory/ingest/git", response_model=IngestResult)
 async def ingest_git(body: IngestGitRequest, request: Request) -> IngestResult:
-    """Ingest git commit history from the workspace and chunk it."""
     workspace = Path(body.workspace)
     if not workspace.exists():
         raise HTTPException(status_code=404, detail=f"Workspace not found: {body.workspace}")
@@ -136,10 +185,7 @@ async def ingest_git(body: IngestGitRequest, request: Request) -> IngestResult:
     conn = _get_conn(request)
     try:
         ingested, chunks = ingest_git_history(
-            conn,
-            workspace=workspace,
-            context_hint=body.context_hint,
-            since=body.since,
+            conn, workspace=workspace, context_hint=body.context_hint, since=body.since,
         )
     finally:
         conn.close()
@@ -149,7 +195,6 @@ async def ingest_git(body: IngestGitRequest, request: Request) -> IngestResult:
 
 @router.post("/memory/ingest/session", response_model=IngestResult)
 async def ingest_session(body: IngestSessionRequest, request: Request) -> IngestResult:
-    """Ingest a session transcript (.jsonl) and chunk it."""
     filepath = Path(body.path)
     if not filepath.exists():
         raise HTTPException(status_code=404, detail=f"Session file not found: {body.path}")
@@ -165,11 +210,52 @@ async def ingest_session(body: IngestSessionRequest, request: Request) -> Ingest
 
 @router.post("/memory/ingest/auto", response_model=IngestAutoResult)
 async def ingest_auto(body: IngestAutoRequest, request: Request) -> IngestAutoResult:
+    """Auto-ingest all md files, git history, and Claude CLI sessions."""
+    memory_dir = Path(os.environ.get("MEMORY_DIR", _DEFAULT_MEMORY_DIR))
+    workspace = Path(os.environ.get("WORKSPACE", _DEFAULT_WORKSPACE))
+
+    conn = _get_conn(request)
+    try:
+        total_md = 0
+        total_git = 0
+        total_sessions = 0
+        total_chunks = 0
+
+        if memory_dir.exists():
+            for f in memory_dir.glob("*.md"):
+                ingested, chunks = ingest_memory_file(conn, f, context_hint=body.context_hint)
+                total_md += ingested
+                total_chunks += chunks
+                if body.clear_after and ingested > 0:
+                    _clear_md_file(f)
+
+        git_ingested, git_chunks = ingest_git_history(
+            conn, workspace=workspace, context_hint=body.context_hint, since=body.since,
+        )
+        total_git += git_ingested
+        total_chunks += git_chunks
+
+        for sf in find_claude_cli_sessions():
+            ingested, chunks = ingest_session_file(conn, sf, context_hint=body.context_hint)
+            total_sessions += ingested
+            total_chunks += chunks
+
+    finally:
+        conn.close()
+
+    return IngestAutoResult(
+        md_files=total_md, git=total_git, sessions=total_sessions, total_chunks=total_chunks,
+    )
+
+
+@router.post("/memory/full", response_model=FullCycleResult)
+async def full_cycle(body: FullCycleRequest, request: Request) -> FullCycleResult:
     """
-    Auto-discover and ingest:
-      - All *.md files in MEMORY_DIR env (default: workspace/memory/)
-      - Git history from WORKSPACE env
-      - All auto-discovered Claude CLI sessions
+    Full smart-memory cycle:
+      1. Ingest all .md files, git history, OpenClaw sessions, Claude CLI sessions
+      2. Safety gate — abort clear if DB has 0 entries
+      3. Clear md files + session files (unless dry_run)
+      4. Rebuild distilled markdown context file
     """
     memory_dir = Path(os.environ.get("MEMORY_DIR", _DEFAULT_MEMORY_DIR))
     workspace = Path(os.environ.get("WORKSPACE", _DEFAULT_WORKSPACE))
@@ -181,47 +267,92 @@ async def ingest_auto(body: IngestAutoRequest, request: Request) -> IngestAutoRe
         total_sessions = 0
         total_chunks = 0
 
-        # Ingest markdown memory files
+        # --- Step 1: Ingest ---
+        md_files_ingested: list[Path] = []
         if memory_dir.exists():
-            md_files = list(memory_dir.glob("*.md"))
-            for f in md_files:
+            for f in memory_dir.glob("*.md"):
                 ingested, chunks = ingest_memory_file(conn, f, context_hint=body.context_hint)
+                if ingested > 0:
+                    md_files_ingested.append(f)
                 total_md += ingested
                 total_chunks += chunks
-                if body.clear_after and ingested > 0:
-                    from datetime import datetime
-                    f.write_text(
-                        f"# Memory — {f.stem}\n\n"
-                        f"*Cleared after distillation on "
-                        f"{datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}.*\n"
-                        f"*Context stored in context.db — rebuilt below.*\n"
-                    )
 
-        # Ingest git history
         git_ingested, git_chunks = ingest_git_history(
-            conn,
-            workspace=workspace,
-            context_hint=body.context_hint,
-            since=body.since,
+            conn, workspace=workspace, context_hint=body.context_hint, since=body.since,
         )
         total_git += git_ingested
         total_chunks += git_chunks
 
-        # Ingest Claude CLI sessions (auto-discovered)
-        session_files = find_claude_cli_sessions()
-        for sf in session_files:
+        # OpenClaw sessions
+        openclaw_sessions = _find_openclaw_sessions()
+        session_files_ingested: list[Path] = []
+        for sf in openclaw_sessions:
             ingested, chunks = ingest_session_file(conn, sf, context_hint=body.context_hint)
+            if ingested > 0:
+                session_files_ingested.append(sf)
             total_sessions += ingested
             total_chunks += chunks
+
+        # Claude CLI sessions
+        for sf in find_claude_cli_sessions():
+            ingested, chunks = ingest_session_file(conn, sf, context_hint=body.context_hint)
+            if ingested > 0:
+                session_files_ingested.append(sf)
+            total_sessions += ingested
+            total_chunks += chunks
+
+        # --- Step 2: Safety gate ---
+        db_count = _db_entry_count(conn)
+        safety_passed = db_count > 0
+
+        md_cleared = 0
+        sessions_cleared = 0
+        rebuilt_to: Optional[str] = None
+
+        if not body.dry_run:
+            if not safety_passed:
+                # Abort — do not clear anything
+                return FullCycleResult(
+                    md_files_ingested=total_md,
+                    git_ingested=total_git,
+                    sessions_ingested=total_sessions,
+                    total_chunks=total_chunks,
+                    db_entries=db_count,
+                    safety_gate_passed=False,
+                    md_files_cleared=0,
+                    session_files_cleared=0,
+                    rebuilt_to=None,
+                )
+
+            # --- Step 3: Clear ---
+            for f in md_files_ingested:
+                _clear_md_file(f)
+                md_cleared += 1
+
+            for sf in session_files_ingested:
+                _clear_session_file(sf)
+                sessions_cleared += 1
+
+            # --- Step 4: Rebuild ---
+            today = datetime.utcnow().strftime("%Y-%m-%d")
+            default_output = str(memory_dir / f"{today}.md")
+            output_path = Path(body.rebuild_output or default_output)
+            rebuild_memory(conn, output_path=output_path, top_n=body.top_n)
+            rebuilt_to = str(output_path.resolve())
 
     finally:
         conn.close()
 
-    return IngestAutoResult(
-        md_files=total_md,
-        git=total_git,
-        sessions=total_sessions,
+    return FullCycleResult(
+        md_files_ingested=total_md,
+        git_ingested=total_git,
+        sessions_ingested=total_sessions,
         total_chunks=total_chunks,
+        db_entries=db_count,
+        safety_gate_passed=safety_passed,
+        md_files_cleared=md_cleared,
+        session_files_cleared=sessions_cleared,
+        rebuilt_to=rebuilt_to,
     )
 
 
@@ -231,9 +362,6 @@ async def query_memory(
     top_n: int = 20,
     min_relevance: float = 0.5,
 ) -> List[MemoryEntry]:
-    """Return top-N most relevant memory entries above the relevance threshold."""
-    import json as _json
-
     conn = _get_conn(request)
     try:
         rows = query_context(conn, top_n=top_n, min_relevance=min_relevance)
@@ -246,31 +374,22 @@ async def query_memory(
             kw = _json.loads(keywords_raw) if keywords_raw else []
         except Exception:
             kw = []
-        # Filter out MD5 hashes from displayed keywords
         kw = [k for k in kw if len(k) != 32]
-        result.append(
-            MemoryEntry(
-                category=category or "general",
-                summary=summary or "",
-                relevance=round(relevance, 4),
-                keywords=kw,
-            )
-        )
+        result.append(MemoryEntry(
+            category=category or "general",
+            summary=summary or "",
+            relevance=round(relevance, 4),
+            keywords=kw,
+        ))
     return result
 
 
 @router.post("/memory/rebuild", response_model=RebuildResult)
 async def rebuild(body: RebuildRequest, request: Request) -> RebuildResult:
-    """Rebuild a distilled markdown file from top-scoring memory entries."""
     output_path = Path(body.output_path)
-
     conn = _get_conn(request)
     try:
         entries_written = rebuild_memory(conn, output_path=output_path, top_n=body.top_n)
     finally:
         conn.close()
-
-    return RebuildResult(
-        entries_written=entries_written,
-        output_path=str(output_path.resolve()),
-    )
+    return RebuildResult(entries_written=entries_written, output_path=str(output_path.resolve()))
