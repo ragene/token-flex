@@ -65,11 +65,20 @@ for p in [
       "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}"
       "TOKEN_FLOW_PORT=${PORT}"
     )
-    [[ -n "${TOKEN_FLOW_DB:-}"  ]] && _env+=("TOKEN_FLOW_DB=${TOKEN_FLOW_DB}")
-    [[ -n "${WORKSPACE:-}"      ]] && _env+=("WORKSPACE=${WORKSPACE}")
-    [[ -n "${MEMORY_DIR:-}"     ]] && _env+=("MEMORY_DIR=${MEMORY_DIR}")
-    [[ -n "${SESSIONS_DIR:-}"   ]] && _env+=("SESSIONS_DIR=${SESSIONS_DIR}")
-    [[ -n "${S3_BUCKET:-}"      ]] && _env+=("S3_BUCKET=${S3_BUCKET}")
+    # Defaults for path vars — can be overridden by caller env
+    _TOKEN_FLOW_DB="${TOKEN_FLOW_DB:-/home/ec2-user/.openclaw/data/token_flow.db}"
+    _WORKSPACE="${WORKSPACE:-/home/ec2-user/.openclaw/workspace}"
+    _MEMORY_DIR="${MEMORY_DIR:-/home/ec2-user/.openclaw/workspace/memory}"
+    _SESSIONS_DIR="${SESSIONS_DIR:-/home/ec2-user/.openclaw/agents/main/sessions}"
+    _S3_BUCKET="${S3_BUCKET:-smart-memory}"
+
+    _env+=(
+      "TOKEN_FLOW_DB=${_TOKEN_FLOW_DB}"
+      "WORKSPACE=${_WORKSPACE}"
+      "MEMORY_DIR=${_MEMORY_DIR}"
+      "SESSIONS_DIR=${_SESSIONS_DIR}"
+      "S3_BUCKET=${_S3_BUCKET}"
+    )
 
     nohup env "${_env[@]}" python3 "$SERVER_SCRIPT" >> "$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"

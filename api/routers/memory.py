@@ -70,7 +70,10 @@ def _clear_session_file(f: Path) -> None:
 
 def _find_openclaw_sessions() -> list[Path]:
     """Find OpenClaw .jsonl session files from SESSIONS_DIR env."""
-    sessions_dir = os.environ.get("SESSIONS_DIR", "")
+    sessions_dir = os.environ.get(
+        "SESSIONS_DIR",
+        "/home/ec2-user/.openclaw/agents/main/sessions"
+    )
     if not sessions_dir:
         return []
     root = Path(sessions_dir)
