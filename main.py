@@ -13,11 +13,11 @@ WORKSPACE = Path(os.environ.get("WORKSPACE",    "/home/ec2-user/.openclaw/worksp
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR",  "/home/ec2-user/.openclaw/workspace/memory"))
 PORT      = int(os.environ.get("PORT", 8001))
 
-if __name__ == "__main__":
-    # Ensure directories exist (same pattern as smart-memory)
-    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+# Ensure directories exist before any DB access
+MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
+if __name__ == "__main__":
     # Init DB schema
     conn = sqlite3.connect(DB_PATH)
     init_db(conn)
