@@ -91,7 +91,7 @@ TASK_DEF=$(aws ecs register-task-definition \
       \"portMappings\": [{\"containerPort\": 8001, \"protocol\": \"tcp\"}],
       \"essential\": true,
       \"environment\": [
-        {\"name\": \"TOKEN_FLOW_DB\",       \"value\": \"/tmp/token_flow.db\"},
+        {\"name\": \"TOKEN_FLOW_DB\",       \"value\": \"/home/ec2-user/.openclaw/data/token_flow.db\"},
         {\"name\": \"S3_BUCKET\",           \"value\": \"smart-memory\"},
         {\"name\": \"AWS_DEFAULT_REGION\",  \"value\": \"us-west-2\"},
         {\"name\": \"MEMORY_DIR\",          \"value\": \"/home/ec2-user/.openclaw/workspace/memory\"},

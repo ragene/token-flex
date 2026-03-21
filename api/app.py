@@ -3,7 +3,7 @@ FastAPI application factory for token-flow.
 
 Usage:
     from api.app import create_app
-    app = create_app(db_path="token_flow.db")
+    app = create_app(db_path="/home/ec2-user/.openclaw/data/token_flow.db")
 """
 from __future__ import annotations
 
