@@ -87,7 +87,8 @@ def _parse_scores(raw: str, chunks: list[dict]) -> list[dict]:
                 composite_score=0.5,
                 reasoning="parse error — default scores applied",
             )
-            return result
+            result.append(r)
+        return result
 
     # Index by chunk_index for fast lookup
     by_idx: dict[int, dict] = {s["chunk_index"]: s for s in scored if isinstance(s, dict)}
