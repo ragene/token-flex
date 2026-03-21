@@ -49,10 +49,10 @@ def _build_session_data() -> dict:
     import json as _j
     from pathlib import Path
 
-    sessions_dir = Path(os.environ.get(
-        "SESSIONS_DIR",
-        os.path.expanduser("~/.openclaw/agents/main/sessions"),
-    ))
+    sessions_dir = Path(
+        os.environ.get("SESSIONS_DIR") or
+        os.path.expanduser("~/.openclaw/agents/main/sessions")
+    )
     result = {
         "session_id": None, "session_file": None,
         "token_count_approx": 0, "message_count": 0,
@@ -63,7 +63,8 @@ def _build_session_data() -> dict:
         if not sessions_json.exists():
             return result
         meta = _j.loads(sessions_json.read_text(errors="ignore"))
-        sm = next(iter(meta.values()), {}) if meta else {}
+        # Prefer agent:main:main, fall back to first entry
+        sm = meta.get("agent:main:main") or next(iter(meta.values()), {})
         sid = sm.get("sessionId")
         channel = sm.get("lastChannel") or sm.get("deliveryContext", {}).get("channel")
         updated_ms = sm.get("updatedAt")
@@ -72,13 +73,22 @@ def _build_session_data() -> dict:
             datetime.fromtimestamp(updated_ms / 1000, tz=timezone.utc).isoformat()
             if updated_ms else None
         )
-        result.update({"session_id": sid, "channel": channel, "last_updated_at": last_updated})
+        # Use exact token count from metadata if available
+        total_tokens = sm.get("totalTokens")
+        result.update({
+            "session_id":         sid,
+            "channel":            channel,
+            "last_updated_at":    last_updated,
+            "token_count_approx": total_tokens or 0,
+            "model":              sm.get("model"),
+        })
         if sid:
             sf = sessions_dir / f"{sid}.jsonl"
             result["session_file"] = str(sf)
             if sf.exists():
                 raw = sf.read_text(errors="ignore")
-                result["token_count_approx"] = len(raw) // 4
+                if not total_tokens:
+                    result["token_count_approx"] = len(raw) // 4
                 mc = 0
                 for line in raw.splitlines():
                     if not line.strip():
@@ -102,10 +112,10 @@ def _build_token_data() -> dict:
     """Build token count / status data from local session + memory files."""
     from pathlib import Path
 
-    sessions_dir = Path(os.environ.get(
-        "SESSIONS_DIR",
-        os.path.expanduser("~/.openclaw/agents/main/sessions"),
-    ))
+    sessions_dir = Path(
+        os.environ.get("SESSIONS_DIR") or
+        os.path.expanduser("~/.openclaw/agents/main/sessions")
+    )
     memory_dir = Path(os.environ.get(
         "MEMORY_DIR",
         os.path.expanduser("~/.openclaw/workspace/memory"),
