@@ -1,10 +1,14 @@
 """
-GET /chunks        — list chunks with optional filters
-GET /chunks/{id}   — single chunk by primary key
+GET /chunks          — list chunks with optional filters
+GET /chunks/{id}     — single chunk by primary key
+GET /tokens          — token stats across all sessions
+GET /session/current — metadata + token count for the active local session
 """
 from __future__ import annotations
 
+import json as _json
 import sqlite3
+from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -27,6 +31,16 @@ class TokenStats(BaseModel):
     # chunk cache stats
     cached_chunks: int
     cached_chunk_tokens: int
+
+
+class CurrentSessionOut(BaseModel):
+    session_id: Optional[str]
+    session_file: Optional[str]
+    token_count_approx: int
+    message_count: int
+    channel: Optional[str]
+    started_at: Optional[str]
+    last_updated_at: Optional[str]
 
 
 class ChunkOut(BaseModel):
@@ -166,6 +180,100 @@ async def token_stats(request: Request) -> TokenStats:
         distill_threshold=DISTILL_THRESHOLD,
         cached_chunks=crow[0] or 0,
         cached_chunk_tokens=crow[1] or 0,
+    )
+
+
+@router.get("/session/current", response_model=CurrentSessionOut)
+async def current_session(request: Request) -> CurrentSessionOut:
+    """
+    Return metadata and approximate token count for the active local OpenClaw session.
+    Reads sessions.json to find the active session file, then counts tokens and messages.
+    """
+    import os
+
+    SESSIONS_DIR = Path(os.environ.get(
+        "SESSIONS_DIR",
+        Path.home() / ".openclaw/agents/main/sessions",
+    ))
+
+    sessions_json = SESSIONS_DIR / "sessions.json"
+    if not sessions_json.exists():
+        return CurrentSessionOut(
+            session_id=None,
+            session_file=None,
+            token_count_approx=0,
+            message_count=0,
+            channel=None,
+            started_at=None,
+            last_updated_at=None,
+        )
+
+    try:
+        meta = _json.loads(sessions_json.read_text(errors="ignore"))
+    except Exception:
+        meta = {}
+
+    # sessions.json is a dict keyed by agent label — grab the first (main) entry
+    session_meta = next(iter(meta.values()), {}) if meta else {}
+    session_id = session_meta.get("sessionId")
+    channel = session_meta.get("lastChannel") or session_meta.get("deliveryContext", {}).get("channel")
+
+    updated_ms = session_meta.get("updatedAt")
+    last_updated_at: Optional[str] = None
+    if updated_ms:
+        from datetime import datetime, timezone
+        last_updated_at = datetime.fromtimestamp(updated_ms / 1000, tz=timezone.utc).isoformat()
+
+    if not session_id:
+        return CurrentSessionOut(
+            session_id=None,
+            session_file=None,
+            token_count_approx=0,
+            message_count=0,
+            channel=channel,
+            started_at=None,
+            last_updated_at=last_updated_at,
+        )
+
+    session_file = SESSIONS_DIR / f"{session_id}.jsonl"
+    if not session_file.exists():
+        return CurrentSessionOut(
+            session_id=session_id,
+            session_file=str(session_file),
+            token_count_approx=0,
+            message_count=0,
+            channel=channel,
+            started_at=None,
+            last_updated_at=last_updated_at,
+        )
+
+    raw = session_file.read_text(errors="ignore")
+    token_count_approx = len(raw) // 4
+
+    # Count messages (lines with type=human or type=assistant)
+    message_count = 0
+    started_at: Optional[str] = None
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        try:
+            obj = _json.loads(line)
+        except Exception:
+            continue
+        t = obj.get("type", "")
+        if t == "session" and started_at is None:
+            started_at = obj.get("timestamp")
+        if t in ("human", "assistant", "say", "message"):
+            message_count += 1
+
+    return CurrentSessionOut(
+        session_id=session_id,
+        session_file=str(session_file),
+        token_count_approx=token_count_approx,
+        message_count=message_count,
+        channel=channel,
+        started_at=started_at,
+        last_updated_at=last_updated_at,
     )
 
 
