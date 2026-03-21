@@ -93,9 +93,9 @@ for p in [
     ;;
 
   restart)
-    "$0" stop || true
+    bash "${BASH_SOURCE[0]}" stop || true
     sleep 1
-    "$0" start
+    bash "${BASH_SOURCE[0]}" start
     ;;
 
   status)
