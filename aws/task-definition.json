@@ -4,12 +4,12 @@
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "512",
   "memory": "1024",
-  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/freightdawg-ecs-execution-role",
-  "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/freightdawg-ecs-task-role",
+  "executionRoleArn": "arn:aws:iam::531948420901:role/freightdawg-ecs-execution-role",
+  "taskRoleArn": "arn:aws:iam::531948420901:role/freightdawg-ecs-task-role",
   "containerDefinitions": [
     {
       "name": "token-flow",
-      "image": "ACCOUNT_ID.dkr.ecr.us-west-2.amazonaws.com/token-flow:latest",
+      "image": "531948420901.dkr.ecr.us-west-2.amazonaws.com/token-flow:latest",
       "essential": true,
       "portMappings": [
         {
@@ -18,12 +18,14 @@
         }
       ],
       "environment": [
-        { "name": "TOKEN_FLOW_DB",      "value": "/tmp/token_flow.db" },
+        { "name": "TOKEN_FLOW_DB",      "value": "/app/data/token_flow.db" },
         { "name": "S3_BUCKET",          "value": "smart-memory" },
         { "name": "AWS_DEFAULT_REGION", "value": "us-west-2" },
-        { "name": "MEMORY_DIR",         "value": "/home/ec2-user/.openclaw/workspace/memory" },
-        { "name": "WORKSPACE",          "value": "/home/ec2-user/.openclaw/workspace" },
-        { "name": "PORT",               "value": "8001" }
+        { "name": "MEMORY_DIR",         "value": "/app/memory" },
+        { "name": "WORKSPACE",          "value": "/app" },
+        { "name": "PORT",               "value": "8001" },
+        { "name": "ECS_CLUSTER",        "value": "token-flow" },
+        { "name": "ECS_SERVICE",        "value": "token-flow" }
       ],
       "secrets": [
         {
@@ -34,7 +36,7 @@
       "logConfiguration": {
         "logDriver": "awslogs",
         "options": {
-          "awslogs-group": "/ecs/freightdawg",
+          "awslogs-group": "/ecs/token-flow",
           "awslogs-region": "us-west-2",
           "awslogs-stream-prefix": "token-flow"
         }
