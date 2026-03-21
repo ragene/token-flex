@@ -42,6 +42,108 @@ def _normalize_db_url(db_path: str) -> str:
     return f"sqlite:///{db_path}"
 
 
+# ── Session / token data builders (local files) ───────────────────────────────
+
+def _build_session_data() -> dict:
+    """Read the active OpenClaw session from local disk."""
+    import json as _j
+    from pathlib import Path
+
+    sessions_dir = Path(os.environ.get(
+        "SESSIONS_DIR",
+        os.path.expanduser("~/.openclaw/agents/main/sessions"),
+    ))
+    result = {
+        "session_id": None, "session_file": None,
+        "token_count_approx": 0, "message_count": 0,
+        "channel": None, "started_at": None, "last_updated_at": None,
+    }
+    try:
+        sessions_json = sessions_dir / "sessions.json"
+        if not sessions_json.exists():
+            return result
+        meta = _j.loads(sessions_json.read_text(errors="ignore"))
+        sm = next(iter(meta.values()), {}) if meta else {}
+        sid = sm.get("sessionId")
+        channel = sm.get("lastChannel") or sm.get("deliveryContext", {}).get("channel")
+        updated_ms = sm.get("updatedAt")
+        from datetime import timezone
+        last_updated = (
+            datetime.fromtimestamp(updated_ms / 1000, tz=timezone.utc).isoformat()
+            if updated_ms else None
+        )
+        result.update({"session_id": sid, "channel": channel, "last_updated_at": last_updated})
+        if sid:
+            sf = sessions_dir / f"{sid}.jsonl"
+            result["session_file"] = str(sf)
+            if sf.exists():
+                raw = sf.read_text(errors="ignore")
+                result["token_count_approx"] = len(raw) // 4
+                mc = 0
+                for line in raw.splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        obj = _j.loads(line)
+                    except Exception:
+                        continue
+                    t = obj.get("type", "")
+                    if t == "session" and result["started_at"] is None:
+                        result["started_at"] = obj.get("timestamp")
+                    if t in ("human", "assistant", "say", "message"):
+                        mc += 1
+                result["message_count"] = mc
+    except Exception as exc:
+        log.debug("_build_session_data failed (non-fatal): %s", exc)
+    return result
+
+
+def _build_token_data() -> dict:
+    """Build token count / status data from local session + memory files."""
+    from pathlib import Path
+
+    sessions_dir = Path(os.environ.get(
+        "SESSIONS_DIR",
+        os.path.expanduser("~/.openclaw/agents/main/sessions"),
+    ))
+    memory_dir = Path(os.environ.get(
+        "MEMORY_DIR",
+        os.path.expanduser("~/.openclaw/workspace/memory"),
+    ))
+    warn      = int(os.environ.get("SMART_MEMORY_WARN_TOKENS",   "30000"))
+    distill   = int(os.environ.get("SMART_MEMORY_DISTILL_TOKENS", "30000"))
+
+    def _approx(p: Path) -> int:
+        try:
+            return len(p.read_text(errors="ignore")) // 4
+        except Exception:
+            return 0
+
+    session_files = list(sessions_dir.glob("*.jsonl")) if sessions_dir.exists() else []
+    session_tokens = sum(_approx(f) for f in session_files)
+    today = datetime.utcnow().date().isoformat()
+    memory_tokens = _approx(memory_dir / f"{today}.md")
+    total = session_tokens + memory_tokens
+
+    if total >= distill:
+        status, msg = "critical", f"⚠️ Context very large (~{total:,} tokens). Distill NOW."
+    elif total >= warn:
+        status, msg = "warning", f"🟡 Context growing (~{total:,} tokens). Consider distilling."
+    else:
+        status, msg = "ok", f"✅ Context healthy (~{total:,} tokens)."
+
+    return {
+        "total_tokens_approx": total,
+        "session_tokens":      session_tokens,
+        "memory_tokens":       memory_tokens,
+        "session_files":       len(session_files),
+        "status":              status,
+        "message":             msg,
+        "warn_threshold":      warn,
+        "distill_threshold":   distill,
+    }
+
+
 # ── Snapshot builder ──────────────────────────────────────────────────────────
 
 def _build_snapshot(db_path: str) -> dict:
@@ -137,6 +239,8 @@ def _build_snapshot(db_path: str) -> dict:
         "events":          events,
         "memory_entries":  memory_entries,
         "pipeline_events": pipeline_events,
+        "session":         _build_session_data(),
+        "tokens":          _build_token_data(),
     }
 
 

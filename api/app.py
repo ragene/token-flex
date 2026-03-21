@@ -3,7 +3,7 @@ FastAPI application factory for token-flow.
 
 Usage:
     from api.app import create_app
-    app = create_app(db_path="/home/ec2-user/.openclaw/data/token_flow.db")
+    app = create_app(database_url="postgresql://user:pass@host:5432/dbname")
 """
 from __future__ import annotations
 
@@ -18,12 +18,12 @@ from api.routers import health, ingest, chunks, summaries, memory, token_data
 logger = logging.getLogger(__name__)
 
 
-def create_app(db_path: str) -> FastAPI:
+def create_app(database_url: str) -> FastAPI:
     """
     Create and configure the token-flow FastAPI application.
 
     Args:
-        db_path: Path to the SQLite database file.
+        database_url: PostgreSQL connection URL.
 
     Returns:
         Configured FastAPI instance.
@@ -51,8 +51,11 @@ def create_app(db_path: str) -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Store db_path on app.state for use in request handlers
-    app.state.db_path = db_path
+    # Store database_url on app.state for use in request handlers
+    app.state.database_url = database_url
+    # Legacy alias — some routers still read db_path; point it at the URL string
+    # so health endpoint can display something meaningful
+    app.state.db_path = database_url
 
     # Register routers
     app.include_router(health.router)
@@ -62,5 +65,32 @@ def create_app(db_path: str) -> FastAPI:
     app.include_router(memory.router)
     app.include_router(token_data.router)
 
-    logger.info("token-flow app created (db=%s)", db_path)
+    # Init DB schema on app startup + start background session push
+    @app.on_event("startup")
+    async def _init_db():
+        import asyncio
+        from db.schema import init_db
+        from db.pg_compat import connect as pg_connect
+        conn = pg_connect(database_url)
+        try:
+            init_db(conn)
+        finally:
+            conn.close()
+        db_label = "SQLite" if database_url.startswith("sqlite") else "PostgreSQL"
+        logger.info(f"token-flow DB schema initialized ({db_label})")
+
+        # Background task: push snapshot (including live session data) every 30s
+        async def _session_push_loop():
+            from api.push_client import push_snapshot
+            await asyncio.sleep(5)  # brief startup delay
+            while True:
+                try:
+                    push_snapshot(database_url)
+                except Exception as exc:
+                    logger.debug("session push loop error (non-fatal): %s", exc)
+                await asyncio.sleep(30)
+
+        asyncio.create_task(_session_push_loop())
+
+    logger.info("token-flow app created (db=PostgreSQL)")
     return app
