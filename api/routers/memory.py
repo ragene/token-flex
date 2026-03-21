@@ -23,6 +23,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from db.schema import init_db
+from api.push_client import push_snapshot, log_pipeline_event
 from engine.ingestor import (
     find_claude_cli_sessions,
     ingest_git_history,
@@ -172,6 +173,7 @@ async def ingest_file(body: IngestFileRequest, request: Request) -> IngestResult
         raise HTTPException(status_code=404, detail=f"File not found: {body.path}")
 
     conn = _get_conn(request)
+    db_path: str = request.app.state.db_path
     try:
         if body.clear:
             conn.execute("DELETE FROM memory_entries WHERE source_file = ?", (filepath.name,))
@@ -180,6 +182,8 @@ async def ingest_file(body: IngestFileRequest, request: Request) -> IngestResult
     finally:
         conn.close()
 
+    log_pipeline_event(db_path, "ingest", {"source": body.path, "ingested": ingested, "chunks_created": chunks})
+    push_snapshot(db_path)
     return IngestResult(ingested=ingested, chunks_created=chunks)
 
 
@@ -189,6 +193,7 @@ async def ingest_git(body: IngestGitRequest, request: Request) -> IngestResult:
     if not workspace.exists():
         raise HTTPException(status_code=404, detail=f"Workspace not found: {body.workspace}")
 
+    db_path: str = request.app.state.db_path
     conn = _get_conn(request)
     try:
         ingested, chunks = ingest_git_history(
@@ -197,6 +202,8 @@ async def ingest_git(body: IngestGitRequest, request: Request) -> IngestResult:
     finally:
         conn.close()
 
+    log_pipeline_event(db_path, "ingest", {"source": "git", "since": body.since, "ingested": ingested, "chunks_created": chunks})
+    push_snapshot(db_path)
     return IngestResult(ingested=ingested, chunks_created=chunks)
 
 
@@ -206,12 +213,15 @@ async def ingest_session(body: IngestSessionRequest, request: Request) -> Ingest
     if not filepath.exists():
         raise HTTPException(status_code=404, detail=f"Session file not found: {body.path}")
 
+    db_path: str = request.app.state.db_path
     conn = _get_conn(request)
     try:
         ingested, chunks = ingest_session_file(conn, filepath, context_hint=body.context_hint)
     finally:
         conn.close()
 
+    log_pipeline_event(db_path, "ingest", {"source": body.path, "ingested": ingested, "chunks_created": chunks})
+    push_snapshot(db_path)
     return IngestResult(ingested=ingested, chunks_created=chunks)
 
 
@@ -221,6 +231,7 @@ async def ingest_auto(body: IngestAutoRequest, request: Request) -> IngestAutoRe
     memory_dir = Path(os.environ.get("MEMORY_DIR", _DEFAULT_MEMORY_DIR))
     workspace = Path(os.environ.get("WORKSPACE", _DEFAULT_WORKSPACE))
 
+    db_path: str = request.app.state.db_path
     conn = _get_conn(request)
     try:
         total_md = 0
@@ -250,9 +261,15 @@ async def ingest_auto(body: IngestAutoRequest, request: Request) -> IngestAutoRe
     finally:
         conn.close()
 
-    return IngestAutoResult(
+    result = IngestAutoResult(
         md_files=total_md, git=total_git, sessions=total_sessions, total_chunks=total_chunks,
     )
+    log_pipeline_event(db_path, "ingest", {
+        "mode": "auto", "md_files": total_md, "git": total_git,
+        "sessions": total_sessions, "total_chunks": total_chunks,
+    })
+    push_snapshot(db_path)
+    return result
 
 
 @router.post("/memory/full", response_model=FullCycleResult)
@@ -267,6 +284,7 @@ async def full_cycle(body: FullCycleRequest, request: Request) -> FullCycleResul
     memory_dir = Path(os.environ.get("MEMORY_DIR", _DEFAULT_MEMORY_DIR))
     workspace = Path(os.environ.get("WORKSPACE", _DEFAULT_WORKSPACE))
 
+    db_path: str = request.app.state.db_path
     conn = _get_conn(request)
     try:
         total_md = 0
@@ -322,6 +340,12 @@ async def full_cycle(body: FullCycleRequest, request: Request) -> FullCycleResul
         if not body.dry_run:
             if not safety_passed:
                 # Abort — do not clear anything
+                log_pipeline_event(db_path, "ingest", {
+                    "mode": "full_cycle", "safety_gate": False,
+                    "md_files": total_md, "git": total_git,
+                    "sessions": total_sessions, "chunks": total_chunks,
+                })
+                push_snapshot(db_path)
                 return FullCycleResult(
                     md_files_ingested=total_md,
                     git_ingested=total_git,
@@ -361,6 +385,13 @@ async def full_cycle(body: FullCycleRequest, request: Request) -> FullCycleResul
 
             total_chunks += raw_file_chunks
 
+            # Log chunk event after all chunking is done
+            log_pipeline_event(db_path, "chunk", {
+                "raw_file_chunks": raw_file_chunks,
+                "total_new_chunks": total_chunks,
+            })
+            push_snapshot(db_path)
+
             # --- Step 4: Clear ---
             for f in md_files_ingested:
                 _clear_md_file(f)
@@ -370,12 +401,24 @@ async def full_cycle(body: FullCycleRequest, request: Request) -> FullCycleResul
                 _clear_session_file(sf)
                 sessions_cleared += 1
 
-            # --- Step 4: Prune processed chunks (reset token accumulation) ---
+            log_pipeline_event(db_path, "clear", {
+                "md_files_cleared": md_cleared,
+                "session_files_cleared": sessions_cleared,
+            })
+            push_snapshot(db_path)
+
+            # --- Step 4: Prune processed chunks ---
             pruned = conn.execute(
                 "DELETE FROM chunk_cache WHERE is_summarized = 1 AND pushed_to_s3_at IS NOT NULL"
             ).rowcount
             conn.commit()
             chunks_remaining = conn.execute("SELECT COUNT(*) FROM chunk_cache").fetchone()[0]
+
+            log_pipeline_event(db_path, "distill", {
+                "chunks_pruned": pruned,
+                "chunks_remaining": chunks_remaining,
+            })
+            push_snapshot(db_path)
 
             # --- Step 5: Rebuild ---
             today = datetime.utcnow().strftime("%Y-%m-%d")
@@ -383,6 +426,13 @@ async def full_cycle(body: FullCycleRequest, request: Request) -> FullCycleResul
             output_path = Path(body.rebuild_output or default_output)
             rebuild_memory(conn, output_path=output_path, top_n=body.top_n)
             rebuilt_to = str(output_path.resolve())
+
+            log_pipeline_event(db_path, "rebuild", {
+                "output": rebuilt_to,
+                "top_n": body.top_n,
+                "db_entries": db_count,
+            })
+            push_snapshot(db_path)
 
     finally:
         conn.close()
@@ -433,10 +483,14 @@ async def query_memory(
 
 @router.post("/memory/rebuild", response_model=RebuildResult)
 async def rebuild(body: RebuildRequest, request: Request) -> RebuildResult:
+    db_path: str = request.app.state.db_path
     output_path = Path(body.output_path)
     conn = _get_conn(request)
     try:
         entries_written = rebuild_memory(conn, output_path=output_path, top_n=body.top_n)
     finally:
         conn.close()
+
+    log_pipeline_event(db_path, "rebuild", {"output": str(output_path.resolve()), "top_n": body.top_n, "entries_written": entries_written})
+    push_snapshot(db_path)
     return RebuildResult(entries_written=entries_written, output_path=str(output_path.resolve()))

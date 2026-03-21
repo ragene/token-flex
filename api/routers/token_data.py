@@ -84,6 +84,38 @@ def _build_snapshot(db_path: str) -> dict:
         """).fetchall()
         events = [dict(r) for r in event_rows]
 
+        # Latest 50 memory entries
+        try:
+            memory_rows = c.execute("""
+                SELECT id, source_file, category, summary, keywords, relevance, created_at
+                FROM memory_entries
+                ORDER BY relevance DESC, created_at DESC
+                LIMIT 50
+            """).fetchall()
+            memory_entries = [dict(r) for r in memory_rows]
+        except Exception:
+            memory_entries = []
+
+        # Latest 50 pipeline events
+        try:
+            import json as _j
+            pipeline_rows = c.execute("""
+                SELECT id, event_type, detail, created_at
+                FROM pipeline_events
+                ORDER BY created_at DESC
+                LIMIT 50
+            """).fetchall()
+            pipeline_events = []
+            for r in pipeline_rows:
+                row = dict(r)
+                try:
+                    row["detail"] = _j.loads(row["detail"]) if row["detail"] else {}
+                except Exception:
+                    row["detail"] = {}
+                pipeline_events.append(row)
+        except Exception:
+            pipeline_events = []
+
     finally:
         c.close()
 
@@ -95,8 +127,10 @@ def _build_snapshot(db_path: str) -> dict:
             "grand_total_calls":  grand_calls,
             "grand_cost_usd":     grand_cost,
         },
-        "chunks": chunks,
-        "events": events,
+        "chunks":          chunks,
+        "events":          events,
+        "memory_entries":  memory_entries,
+        "pipeline_events": pipeline_events,
     }
 
 

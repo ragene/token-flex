@@ -62,6 +62,16 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_unpushed  ON chunk_cache(pushed_to_s3_at)
             WHERE pushed_to_s3_at IS NULL;
 
+        -- Pipeline activity log — one row per chunk/distill/clear/rebuild event
+        CREATE TABLE IF NOT EXISTS pipeline_events (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type  TEXT NOT NULL,   -- 'chunk' | 'distill' | 'clear' | 'rebuild' | 'ingest'
+            detail      TEXT,            -- JSON blob: counts, paths, stats
+            created_at  TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_ev_type    ON pipeline_events(event_type);
+        CREATE INDEX IF NOT EXISTS idx_ev_created ON pipeline_events(created_at DESC);
+
         -- FreightDawg token usage mirror (synced from FreightDawg API)
         CREATE TABLE IF NOT EXISTS fd_token_usage (
             id                   INTEGER PRIMARY KEY,
