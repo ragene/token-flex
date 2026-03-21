@@ -1,0 +1,51 @@
+{
+  "family": "token-flow",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/freightdawg-ecs-execution-role",
+  "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/freightdawg-ecs-task-role",
+  "containerDefinitions": [
+    {
+      "name": "token-flow",
+      "image": "ACCOUNT_ID.dkr.ecr.us-west-2.amazonaws.com/token-flow:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 8001,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        { "name": "TOKEN_FLOW_DB",      "value": "/tmp/token_flow.db" },
+        { "name": "S3_BUCKET",          "value": "smart-memory" },
+        { "name": "AWS_DEFAULT_REGION", "value": "us-west-2" },
+        { "name": "MEMORY_DIR",         "value": "/home/ec2-user/.openclaw/workspace/memory" },
+        { "name": "WORKSPACE",          "value": "/home/ec2-user/.openclaw/workspace" },
+        { "name": "PORT",               "value": "8001" }
+      ],
+      "secrets": [
+        {
+          "name": "ANTHROPIC_API_KEY",
+          "valueFrom": "/token-flow/anthropic_api_key"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/freightdawg",
+          "awslogs-region": "us-west-2",
+          "awslogs-stream-prefix": "token-flow"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -f http://localhost:8001/health || exit 1"],
+        "interval": 15,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 30
+      }
+    }
+  ]
+}
