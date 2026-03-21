@@ -25,7 +25,8 @@
         { "name": "WORKSPACE",          "value": "/app" },
         { "name": "PORT",               "value": "8001" },
         { "name": "ECS_CLUSTER",        "value": "token-flow" },
-        { "name": "ECS_SERVICE",        "value": "token-flow" }
+        { "name": "ECS_SERVICE",        "value": "token-flow" },
+        { "name": "TOKEN_FLOW_UI_URL",  "value": "https://token-flow-api.thefreightdawg.com" }
       ],
       "secrets": [
         {

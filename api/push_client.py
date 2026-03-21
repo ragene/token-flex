@@ -31,7 +31,7 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_UI_URL = "http://localhost:8001"
+_DEFAULT_UI_URL = "https://token-flow-api.thefreightdawg.com"
 
 
 def _build_snapshot(db_path: str) -> dict:
