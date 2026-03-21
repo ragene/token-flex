@@ -3,16 +3,22 @@ POST /ingest
 
 Accepts raw text or a file path, chunks it, scores each chunk,
 and persists to chunk_cache.
+
+source_type options:
+  "raw"         — (default) chunk the provided text directly
+  "memory_file" — ingest via ingest_memory_file (markdown sections → memory_entries + chunks)
+  "session"     — ingest via ingest_session_file (.jsonl session → memory_entries + chunks)
 """
 from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from db.schema import init_db
 from engine.chunker import chunk_text
 from engine.scorer import score_chunks
 
@@ -23,6 +29,7 @@ class IngestRequest(BaseModel):
     source: str
     text: Optional[str] = None
     context_hint: str = ""
+    source_type: Literal["raw", "memory_file", "session"] = "raw"
 
 
 class IngestResponse(BaseModel):
@@ -35,11 +42,40 @@ async def ingest(body: IngestRequest, request: Request) -> IngestResponse:
     """
     Ingest text into the chunk pipeline.
 
-    - If `text` is provided, use it directly.
-    - Otherwise, read the file at `source`.
-    - Chunk → score → persist to chunk_cache.
+    - source_type="raw" (default): chunk the text directly (text field or file at source).
+    - source_type="memory_file": ingest markdown file via memory pipeline (memory_entries + chunks).
+    - source_type="session": ingest .jsonl session file via memory pipeline (memory_entries + chunks).
     """
-    # Resolve text
+    db_path: str = request.app.state.db_path
+
+    # --- memory_file and session types go through the memory ingestor ---
+    if body.source_type in ("memory_file", "session"):
+        from engine.ingestor import ingest_memory_file, ingest_session_file
+
+        filepath = Path(body.source)
+        if not filepath.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Source file not found: {body.source}",
+            )
+
+        conn = sqlite3.connect(db_path)
+        init_db(conn)
+        try:
+            if body.source_type == "memory_file":
+                _entries, chunks_created = ingest_memory_file(
+                    conn, filepath, context_hint=body.context_hint
+                )
+            else:
+                _entries, chunks_created = ingest_session_file(
+                    conn, filepath, context_hint=body.context_hint
+                )
+        finally:
+            conn.close()
+
+        return IngestResponse(chunks_created=chunks_created, avg_composite_score=0.0)
+
+    # --- raw type: classic chunk-score-persist path ---
     if body.text is not None:
         raw_text = body.text
     else:
@@ -69,7 +105,6 @@ async def ingest(body: IngestRequest, request: Request) -> IngestResponse:
     scored = score_chunks(chunks, context_hint=body.context_hint)
 
     # Persist
-    db_path: str = request.app.state.db_path
     conn = sqlite3.connect(db_path)
     try:
         for chunk in scored:

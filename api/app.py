@@ -12,7 +12,7 @@ import logging
 from dotenv import load_dotenv
 from fastapi import FastAPI
 
-from api.routers import health, ingest, chunks, summaries
+from api.routers import health, ingest, chunks, summaries, memory
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,7 @@ def create_app(db_path: str) -> FastAPI:
     app.include_router(ingest.router)
     app.include_router(chunks.router)
     app.include_router(summaries.router)
+    app.include_router(memory.router)
 
     logger.info("token-flow app created (db=%s)", db_path)
     return app

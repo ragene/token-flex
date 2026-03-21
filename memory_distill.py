@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-Memory distillation skill.
-- Reads session memory files
-- Summarizes using Claude claude-haiku-4-5 via Anthropic API
-- Stores summaries in SQLite with relevance scoring
-- Rebuilds memory context from top-scoring entries
+Legacy CLI interface. The FastAPI service in api/ now provides all functionality via HTTP.
+Use `python main.py` to start the service.
 """
 import sqlite3
 import os
