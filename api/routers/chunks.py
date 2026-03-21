@@ -3,15 +3,18 @@ GET /chunks          — list chunks with optional filters
 GET /chunks/{id}     — single chunk by primary key
 GET /tokens          — token stats across all sessions
 GET /session/current — metadata + token count for the active local session
+GET /session/stream  — SSE stream: pushes session + token data on an interval
 """
 from __future__ import annotations
 
+import asyncio
 import json as _json
 import sqlite3
 from pathlib import Path
-from typing import List, Optional
+from typing import AsyncGenerator, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 router = APIRouter(tags=["chunks"])
@@ -274,6 +277,137 @@ async def current_session(request: Request) -> CurrentSessionOut:
         channel=channel,
         started_at=started_at,
         last_updated_at=last_updated_at,
+    )
+
+
+@router.get("/session/stream")
+async def session_stream(request: Request, interval: int = 10) -> StreamingResponse:
+    """
+    SSE endpoint — pushes a combined session + token snapshot every `interval` seconds.
+    Clients connect once and receive live updates without polling.
+    """
+    import os
+    from datetime import datetime, timezone
+
+    SESSIONS_DIR = Path(os.environ.get(
+        "SESSIONS_DIR",
+        Path.home() / ".openclaw/agents/main/sessions",
+    ))
+
+    WARN_THRESHOLD    = int(os.environ.get("SMART_MEMORY_WARN_TOKENS",   "30000"))
+    DISTILL_THRESHOLD = int(os.environ.get("SMART_MEMORY_DISTILL_TOKENS", "30000"))
+    MEMORY_DIR        = Path(os.environ.get("MEMORY_DIR",
+                             "/home/ec2-user/.openclaw/workspace/memory"))
+
+    def _approx_tokens(p: Path) -> int:
+        try:
+            return len(p.read_text(errors="ignore")) // 4
+        except Exception:
+            return 0
+
+    def _build_snapshot() -> dict:
+        # ── session ──────────────────────────────────────────────────────────
+        sessions_json = SESSIONS_DIR / "sessions.json"
+        session_data: dict = {
+            "session_id": None, "session_file": None,
+            "token_count_approx": 0, "message_count": 0,
+            "channel": None, "started_at": None, "last_updated_at": None,
+        }
+        if sessions_json.exists():
+            try:
+                meta = _json.loads(sessions_json.read_text(errors="ignore"))
+                sm = next(iter(meta.values()), {}) if meta else {}
+                sid = sm.get("sessionId")
+                channel = sm.get("lastChannel") or sm.get("deliveryContext", {}).get("channel")
+                updated_ms = sm.get("updatedAt")
+                last_updated_at = (
+                    datetime.fromtimestamp(updated_ms / 1000, tz=timezone.utc).isoformat()
+                    if updated_ms else None
+                )
+                session_data.update({"session_id": sid, "channel": channel, "last_updated_at": last_updated_at})
+                if sid:
+                    sf = SESSIONS_DIR / f"{sid}.jsonl"
+                    session_data["session_file"] = str(sf)
+                    if sf.exists():
+                        raw = sf.read_text(errors="ignore")
+                        session_data["token_count_approx"] = len(raw) // 4
+                        mc = 0
+                        for line in raw.splitlines():
+                            if not line.strip():
+                                continue
+                            try:
+                                obj = _json.loads(line)
+                            except Exception:
+                                continue
+                            t = obj.get("type", "")
+                            if t == "session" and session_data["started_at"] is None:
+                                session_data["started_at"] = obj.get("timestamp")
+                            if t in ("human", "assistant", "say", "message"):
+                                mc += 1
+                        session_data["message_count"] = mc
+            except Exception:
+                pass
+
+        # ── tokens ────────────────────────────────────────────────────────────
+        session_files = list(SESSIONS_DIR.glob("*.jsonl")) if SESSIONS_DIR.exists() else []
+        session_tokens = sum(_approx_tokens(f) for f in session_files)
+        today = datetime.utcnow().date().isoformat()
+        mem_file = MEMORY_DIR / f"{today}.md"
+        memory_tokens = _approx_tokens(mem_file) if mem_file.exists() else 0
+        total = session_tokens + memory_tokens
+
+        if total >= DISTILL_THRESHOLD:
+            status, msg = "critical", f"⚠️ Context very large (~{total:,} tokens). Distill NOW."
+        elif total >= WARN_THRESHOLD:
+            status, msg = "warning", f"🟡 Context growing (~{total:,} tokens). Consider distilling."
+        else:
+            status, msg = "ok", f"✅ Context healthy (~{total:,} tokens)."
+
+        token_data = {
+            "total_tokens_approx": total,
+            "session_tokens": session_tokens,
+            "memory_tokens": memory_tokens,
+            "session_files": len(session_files),
+            "status": status,
+            "message": msg,
+            "warn_threshold": WARN_THRESHOLD,
+            "distill_threshold": DISTILL_THRESHOLD,
+        }
+
+        return {
+            "ts": datetime.utcnow().isoformat() + "Z",
+            "session": session_data,
+            "tokens": token_data,
+        }
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        # Send an immediate snapshot on connect
+        try:
+            snapshot = _build_snapshot()
+            yield f"data: {_json.dumps(snapshot)}\n\n"
+        except Exception as exc:
+            yield f"data: {_json.dumps({'error': str(exc)})}\n\n"
+
+        while True:
+            # Check if the client disconnected
+            if await request.is_disconnected():
+                break
+            await asyncio.sleep(max(1, min(interval, 300)))
+            if await request.is_disconnected():
+                break
+            try:
+                snapshot = _build_snapshot()
+                yield f"data: {_json.dumps(snapshot)}\n\n"
+            except Exception as exc:
+                yield f"data: {_json.dumps({'error': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
