@@ -14,14 +14,19 @@ router = APIRouter(tags=["chunks"])
 
 
 class TokenStats(BaseModel):
-    total_chunks: int
-    total_tokens: int
-    summarized_chunks: int
-    unsummarized_chunks: int
-    pushed_to_s3: int
-    pending_push: int
-    avg_tokens_per_chunk: float
-    by_source: list
+    total_tokens_approx: int
+    session_tokens: int
+    claude_tokens: int
+    memory_tokens: int
+    session_files: int
+    claude_session_files: int
+    status: str           # ok | warning | critical
+    message: str
+    warn_threshold: int
+    distill_threshold: int
+    # chunk cache stats
+    cached_chunks: int
+    cached_chunk_tokens: int
 
 
 class ChunkOut(BaseModel):
@@ -78,44 +83,89 @@ def _row_to_chunk(row: tuple) -> ChunkOut:
 
 @router.get("/tokens", response_model=TokenStats)
 async def token_stats(request: Request) -> TokenStats:
-    """Return current token count and chunk breakdown across the cache."""
+    """
+    Estimate total context tokens across active session files + today's memory file.
+    Uses the same char/4 method as smart-memory. Also includes chunk cache stats.
+    """
+    import os
+    from pathlib import Path
+    from datetime import date as _date
+
+    WARN_THRESHOLD   = int(os.environ.get("SMART_MEMORY_WARN_TOKENS",   "30000"))
+    DISTILL_THRESHOLD = int(os.environ.get("SMART_MEMORY_DISTILL_TOKENS", "30000"))
+
+    SESSIONS_DIR = Path(os.environ.get("SESSIONS_DIR",
+                        Path.home() / ".openclaw/agents/main/sessions"))
+    MEMORY_DIR   = Path(os.environ.get("MEMORY_DIR",
+                        "/home/ec2-user/.openclaw/workspace/memory"))
+
+    def _approx_tokens(p: Path) -> int:
+        try:
+            return len(p.read_text(errors="ignore")) // 4
+        except Exception:
+            return 0
+
+    def _claude_cli_sessions() -> list:
+        home = Path.home()
+        found = list(home.glob(".claude/projects/*/conversation.jsonl"))
+        found += list(home.glob(".claude/conversations/*.jsonl"))
+        extra = os.environ.get("CLAUDE_SESSIONS_DIR", "")
+        if extra:
+            root = Path(extra)
+            found += list(root.glob("projects/*/conversation.jsonl"))
+            found += list(root.glob("conversations/*.jsonl"))
+        return list(set(found))
+
+    # Session files
+    session_files = list(SESSIONS_DIR.glob("*.jsonl")) if SESSIONS_DIR.exists() else []
+    session_tokens = sum(_approx_tokens(f) for f in session_files)
+
+    # Claude CLI sessions
+    claude_files = _claude_cli_sessions()
+    claude_tokens = sum(_approx_tokens(f) for f in claude_files)
+
+    # Today's memory file
+    today = _date.today().isoformat()
+    mem_file = MEMORY_DIR / f"{today}.md"
+    memory_tokens = _approx_tokens(mem_file) if mem_file.exists() else 0
+
+    total = session_tokens + claude_tokens + memory_tokens
+
+    if total >= DISTILL_THRESHOLD:
+        status = "critical"
+        msg = (f"⚠️ Context is very large (~{total:,} tokens). "
+               "Distill NOW to avoid context degradation. Run: POST /memory/full")
+    elif total >= WARN_THRESHOLD:
+        status = "warning"
+        msg = (f"🟡 Context growing (~{total:,} tokens). "
+               "Consider distilling soon. Run: POST /memory/full")
+    else:
+        status = "ok"
+        msg = f"✅ Context healthy (~{total:,} tokens)."
+
+    # Chunk cache totals
     db_path: str = request.app.state.db_path
     conn = sqlite3.connect(db_path)
     try:
-        row = conn.execute("""
-            SELECT
-                COUNT(*),
-                COALESCE(SUM(token_count), 0),
-                COALESCE(SUM(CASE WHEN is_summarized=1 THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN is_summarized=0 THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN pushed_to_s3_at IS NOT NULL THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN is_summarized=1 AND pushed_to_s3_at IS NULL THEN 1 ELSE 0 END), 0)
-            FROM chunk_cache
-        """).fetchone()
-
-        by_source = conn.execute("""
-            SELECT source_label, COUNT(*), COALESCE(SUM(token_count), 0)
-            FROM chunk_cache
-            GROUP BY source_label
-            ORDER BY SUM(token_count) DESC
-            LIMIT 20
-        """).fetchall()
+        crow = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(token_count),0) FROM chunk_cache"
+        ).fetchone()
     finally:
         conn.close()
 
-    total_chunks = row[0] or 0
-    total_tokens = row[1] or 0
-    avg = round(total_tokens / total_chunks, 1) if total_chunks else 0.0
-
     return TokenStats(
-        total_chunks=total_chunks,
-        total_tokens=total_tokens,
-        summarized_chunks=row[2] or 0,
-        unsummarized_chunks=row[3] or 0,
-        pushed_to_s3=row[4] or 0,
-        pending_push=row[5] or 0,
-        avg_tokens_per_chunk=avg,
-        by_source=[{"source": r[0], "chunks": r[1], "tokens": r[2]} for r in by_source],
+        total_tokens_approx=total,
+        session_tokens=session_tokens,
+        claude_tokens=claude_tokens,
+        memory_tokens=memory_tokens,
+        session_files=len(session_files),
+        claude_session_files=len(claude_files),
+        status=status,
+        message=msg,
+        warn_threshold=WARN_THRESHOLD,
+        distill_threshold=DISTILL_THRESHOLD,
+        cached_chunks=crow[0] or 0,
+        cached_chunk_tokens=crow[1] or 0,
     )
 
 
