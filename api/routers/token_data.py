@@ -3,6 +3,7 @@ Token-data router — exposes local token_usage records to token-flow-ui.
 
 Routes
 ------
+  GET  /token-data/stream    — SSE: pushes summary + recent chunks + events on interval
   GET  /token-data/summary   — aggregated usage by (operation, model)
   GET  /token-data/events    — raw event rows with optional filters
   GET  /token-data/export    — CSV download of all rows
@@ -10,11 +11,13 @@ Routes
 """
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
+import json as _json
 import sqlite3
 from datetime import datetime
-from typing import List, Optional
+from typing import AsyncGenerator, List, Optional
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import StreamingResponse
@@ -78,6 +81,112 @@ class TokenSummaryResponse(BaseModel):
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
+
+@router.get("/token-data/stream")
+async def token_data_stream(
+    request: Request,
+    interval: int = Query(10, ge=2, le=300, description="Push interval in seconds"),
+) -> StreamingResponse:
+    """
+    SSE stream — pushes a combined snapshot every `interval` seconds.
+
+    Payload shape:
+    {
+      "ts": "<ISO-8601>Z",
+      "summary": { rows:[...], grand_total_tokens, grand_total_calls, grand_cost_usd },
+      "chunks":  [ { id, source_label, chunk_index, token_count, composite_score,
+                     fact_score, preference_score, intent_score,
+                     summary, is_summarized, created_at } ... ],
+      "events":  [ { id, user_email, operation, model, prompt_tokens,
+                     completion_tokens, total_tokens, cost_usd,
+                     source_label, created_at } ... ]
+    }
+    """
+    db_path: str = request.app.state.db_path
+
+    def _build_snapshot() -> dict:
+        c = sqlite3.connect(db_path)
+        c.row_factory = sqlite3.Row
+        init_db(c)
+        try:
+            # Summary
+            rows = c.execute("""
+                SELECT operation, model,
+                       COUNT(*) as total_calls,
+                       COALESCE(SUM(prompt_tokens),0)     as prompt_tokens,
+                       COALESCE(SUM(completion_tokens),0) as completion_tokens,
+                       COALESCE(SUM(total_tokens),0)      as total_tokens,
+                       COALESCE(SUM(cost_usd),0.0)        as cost_usd
+                FROM token_usage
+                GROUP BY operation, model
+                ORDER BY total_tokens DESC
+            """).fetchall()
+            summary_rows = [dict(r) for r in rows]
+            grand_tokens = sum(r["total_tokens"] for r in summary_rows)
+            grand_calls  = sum(r["total_calls"]  for r in summary_rows)
+            grand_cost   = round(sum(r["cost_usd"] for r in summary_rows), 6)
+
+            # Latest 100 chunks (scored)
+            chunk_rows = c.execute("""
+                SELECT id, source_label, chunk_index, token_count,
+                       composite_score, fact_score, preference_score, intent_score,
+                       summary, is_summarized, created_at
+                FROM chunk_cache
+                ORDER BY created_at DESC
+                LIMIT 100
+            """).fetchall()
+            chunks = [dict(r) for r in chunk_rows]
+
+            # Latest 100 token events
+            event_rows = c.execute("""
+                SELECT id, user_email, operation, model,
+                       prompt_tokens, completion_tokens, total_tokens,
+                       cost_usd, source_label, created_at
+                FROM token_usage
+                ORDER BY created_at DESC
+                LIMIT 100
+            """).fetchall()
+            events = [dict(r) for r in event_rows]
+
+        finally:
+            c.close()
+
+        return {
+            "ts": datetime.utcnow().isoformat() + "Z",
+            "summary": {
+                "rows": summary_rows,
+                "grand_total_tokens": grand_tokens,
+                "grand_total_calls":  grand_calls,
+                "grand_cost_usd":     grand_cost,
+            },
+            "chunks": chunks,
+            "events": events,
+        }
+
+    async def generator() -> AsyncGenerator[str, None]:
+        # Immediate snapshot on connect
+        try:
+            yield f"data: {_json.dumps(_build_snapshot())}\n\n"
+        except Exception as exc:
+            yield f"data: {_json.dumps({'error': str(exc)})}\n\n"
+
+        while True:
+            if await request.is_disconnected():
+                break
+            await asyncio.sleep(max(2, min(interval, 300)))
+            if await request.is_disconnected():
+                break
+            try:
+                yield f"data: {_json.dumps(_build_snapshot())}\n\n"
+            except Exception as exc:
+                yield f"data: {_json.dumps({'error': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
 
 @router.post("/token-data/record", response_model=TokenUsageOut, status_code=201)
 async def record_usage(body: TokenUsageIn, request: Request) -> TokenUsageOut:
