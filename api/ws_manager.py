@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from fastapi import WebSocket
 
 log = logging.getLogger(__name__)
@@ -45,7 +46,7 @@ class WSManager:
         """
         if not self._clients:
             return
-        msg = json.dumps(data)
+        msg = json.dumps(data, default=lambda o: o.isoformat() if isinstance(o, datetime) else str(o))
         dead: set[WebSocket] = set()
         for ws in list(self._clients):
             try:

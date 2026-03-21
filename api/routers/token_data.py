@@ -16,7 +16,6 @@ from __future__ import annotations
 import csv
 import io
 import json as _json
-import sqlite3
 from datetime import datetime
 from typing import List, Optional
 
@@ -25,24 +24,32 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from db.schema import init_db
+from db.pg_compat import connect as pg_connect
+from api.db_helper import get_db_url
 from api.ws_manager import ws_manager
 
 router = APIRouter(tags=["token-data"])
 
+
+def _json_default(obj):
+    """JSON serializer for objects not serializable by default."""
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def _conn(request: Request) -> sqlite3.Connection:
-    db_path: str = request.app.state.db_path
-    c = sqlite3.connect(db_path)
-    c.row_factory = sqlite3.Row
+def _conn(request: Request):
+    database_url: str = request.app.state.database_url
+    c = pg_connect(database_url)
     init_db(c)
     return c
 
 
-def _build_snapshot(db_path: str) -> dict:
+def _build_snapshot(database_url: str) -> dict:
     """Read current state from DB and return a snapshot dict."""
-    c = sqlite3.connect(db_path)
-    c.row_factory = sqlite3.Row
+    c = pg_connect(database_url)
     init_db(c)
     try:
         # Per-operation/model summary
@@ -205,19 +212,19 @@ async def token_data_ws(websocket: WebSocket) -> None:
     Clients can also send any text message (e.g. a ping) and will receive
     an up-to-date snapshot in reply.
     """
-    db_path: str = websocket.app.state.db_path
+    database_url: str = websocket.app.state.database_url
     await ws_manager.connect(websocket)
     try:
         # Send initial snapshot immediately on connect
-        snapshot = _build_snapshot(db_path)
-        await websocket.send_text(_json.dumps(snapshot))
+        snapshot = _build_snapshot(database_url)
+        await websocket.send_text(_json.dumps(snapshot, default=_json_default))
 
         # Keep the connection alive; respond to any client message with a fresh snapshot
         while True:
             try:
                 _ = await websocket.receive_text()
                 snapshot = _build_snapshot(db_path)
-                await websocket.send_text(_json.dumps(snapshot))
+                await websocket.send_text(_json.dumps(snapshot, default=_json_default))
             except WebSocketDisconnect:
                 break
     finally:
@@ -249,7 +256,7 @@ async def push_snapshot(body: PushSnapshotIn) -> dict:
 async def record_usage(body: TokenUsageIn, request: Request) -> TokenUsageOut:
     """Write a single AI call token-usage row and broadcast a fresh snapshot to WS clients."""
     total = body.total_tokens if body.total_tokens is not None else (body.prompt_tokens + body.completion_tokens)
-    db_path: str = request.app.state.db_path
+    database_url: str = get_db_url(request)
     conn = _conn(request)
     try:
         cur = conn.execute(
@@ -270,7 +277,7 @@ async def record_usage(body: TokenUsageIn, request: Request) -> TokenUsageOut:
 
     # Broadcast updated snapshot to all connected WS clients
     if ws_manager.connection_count > 0:
-        snapshot = _build_snapshot(db_path)
+        snapshot = _build_snapshot(database_url)
         await ws_manager.broadcast(snapshot)
 
     return out
@@ -385,7 +392,7 @@ async def export_csv(request: Request) -> StreamingResponse:
 
 # ── Internal helper ───────────────────────────────────────────────────────────
 
-def _row_out(r: sqlite3.Row) -> TokenUsageOut:
+def _row_out(r) -> TokenUsageOut:
     return TokenUsageOut(
         id=r["id"],
         user_email=r["user_email"],
