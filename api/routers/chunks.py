@@ -13,6 +13,17 @@ from pydantic import BaseModel
 router = APIRouter(tags=["chunks"])
 
 
+class TokenStats(BaseModel):
+    total_chunks: int
+    total_tokens: int
+    summarized_chunks: int
+    unsummarized_chunks: int
+    pushed_to_s3: int
+    pending_push: int
+    avg_tokens_per_chunk: float
+    by_source: list
+
+
 class ChunkOut(BaseModel):
     id: int
     source_id: Optional[int]
@@ -62,6 +73,49 @@ def _row_to_chunk(row: tuple) -> ChunkOut:
         pushed_to_s3_at=pushed_to_s3_at,
         s3_key=s3_key,
         created_at=created_at,
+    )
+
+
+@router.get("/tokens", response_model=TokenStats)
+async def token_stats(request: Request) -> TokenStats:
+    """Return current token count and chunk breakdown across the cache."""
+    db_path: str = request.app.state.db_path
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute("""
+            SELECT
+                COUNT(*),
+                COALESCE(SUM(token_count), 0),
+                COALESCE(SUM(CASE WHEN is_summarized=1 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN is_summarized=0 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN pushed_to_s3_at IS NOT NULL THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN is_summarized=1 AND pushed_to_s3_at IS NULL THEN 1 ELSE 0 END), 0)
+            FROM chunk_cache
+        """).fetchone()
+
+        by_source = conn.execute("""
+            SELECT source_label, COUNT(*), COALESCE(SUM(token_count), 0)
+            FROM chunk_cache
+            GROUP BY source_label
+            ORDER BY SUM(token_count) DESC
+            LIMIT 20
+        """).fetchall()
+    finally:
+        conn.close()
+
+    total_chunks = row[0] or 0
+    total_tokens = row[1] or 0
+    avg = round(total_tokens / total_chunks, 1) if total_chunks else 0.0
+
+    return TokenStats(
+        total_chunks=total_chunks,
+        total_tokens=total_tokens,
+        summarized_chunks=row[2] or 0,
+        unsummarized_chunks=row[3] or 0,
+        pushed_to_s3=row[4] or 0,
+        pending_push=row[5] or 0,
+        avg_tokens_per_chunk=avg,
+        by_source=[{"source": r[0], "chunks": r[1], "tokens": r[2]} for r in by_source],
     )
 
 
