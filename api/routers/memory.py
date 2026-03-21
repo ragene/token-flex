@@ -134,6 +134,8 @@ class FullCycleResult(BaseModel):
     safety_gate_passed: bool
     md_files_cleared: int
     session_files_cleared: int
+    chunks_pruned: int
+    chunks_remaining: int
     rebuilt_to: Optional[str]
 
 
@@ -307,6 +309,8 @@ async def full_cycle(body: FullCycleRequest, request: Request) -> FullCycleResul
 
         md_cleared = 0
         sessions_cleared = 0
+        pruned = 0
+        chunks_remaining = 0
         rebuilt_to: Optional[str] = None
 
         if not body.dry_run:
@@ -333,7 +337,14 @@ async def full_cycle(body: FullCycleRequest, request: Request) -> FullCycleResul
                 _clear_session_file(sf)
                 sessions_cleared += 1
 
-            # --- Step 4: Rebuild ---
+            # --- Step 4: Prune processed chunks (reset token accumulation) ---
+            pruned = conn.execute(
+                "DELETE FROM chunk_cache WHERE is_summarized = 1 AND pushed_to_s3_at IS NOT NULL"
+            ).rowcount
+            conn.commit()
+            chunks_remaining = conn.execute("SELECT COUNT(*) FROM chunk_cache").fetchone()[0]
+
+            # --- Step 5: Rebuild ---
             today = datetime.utcnow().strftime("%Y-%m-%d")
             default_output = str(memory_dir / f"{today}.md")
             output_path = Path(body.rebuild_output or default_output)
@@ -352,6 +363,8 @@ async def full_cycle(body: FullCycleRequest, request: Request) -> FullCycleResul
         safety_gate_passed=safety_passed,
         md_files_cleared=md_cleared,
         session_files_cleared=sessions_cleared,
+        chunks_pruned=pruned if not body.dry_run and safety_passed else 0,
+        chunks_remaining=chunks_remaining if not body.dry_run and safety_passed else conn.execute("SELECT COUNT(*) FROM chunk_cache").fetchone()[0],
         rebuilt_to=rebuilt_to,
     )
 
