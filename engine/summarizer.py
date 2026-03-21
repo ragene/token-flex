@@ -10,13 +10,51 @@ from __future__ import annotations
 import logging
 import math
 import re
-import sqlite3
+from typing import Optional
 
 import anthropic
 
 logger = logging.getLogger(__name__)
 
 _HAIKU_MODEL = "claude-haiku-4-5"
+
+_COST_TABLE: dict[str, tuple[float, float]] = {
+    "claude-haiku-4-5":        (0.80,  4.00),
+    "claude-haiku-3-5":        (0.80,  4.00),
+    "claude-haiku-3":          (0.25,  1.25),
+    "claude-3-haiku-20240307": (0.25,  1.25),
+}
+
+
+def _record_token_usage(
+    conn,
+    operation: str,
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    source_label: Optional[str] = None,
+) -> None:
+    """Write a token_usage row to the local DB. Best-effort — never raises."""
+    try:
+        rates = _COST_TABLE.get(model)
+        cost = None
+        if rates:
+            cost = round(
+                (prompt_tokens / 1_000_000) * rates[0]
+                + (completion_tokens / 1_000_000) * rates[1],
+                6,
+            )
+        conn.execute(
+            """INSERT INTO token_usage
+               (operation, model, prompt_tokens, completion_tokens, total_tokens, cost_usd, source_label)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (operation, model, prompt_tokens, completion_tokens,
+             prompt_tokens + completion_tokens, cost, source_label),
+        )
+        conn.commit()
+    except Exception as exc:
+        logger.debug("_record_token_usage failed (non-fatal): %s", exc)
+
 
 _SUMMARIZE_PROMPT = """\
 Summarize the following text chunk, focusing on:
@@ -34,7 +72,7 @@ Return ONLY the summary text, no preamble."""
 
 
 def summarize_top_chunks(
-    conn: sqlite3.Connection,
+    conn,
     top_pct: float = 0.4,
     context_hint: str = "",
 ) -> int:
@@ -88,6 +126,15 @@ def summarize_top_chunks(
             # Strip stray markdown fences just in case
             summary = re.sub(r"^```[a-z]*\s*", "", summary)
             summary = re.sub(r"\s*```$", "", summary)
+            # Record token usage
+            _record_token_usage(
+                conn=conn,
+                operation="summarize",
+                model=_HAIKU_MODEL,
+                prompt_tokens=msg.usage.input_tokens,
+                completion_tokens=msg.usage.output_tokens,
+                source_label=f"chunk:{row_id}",
+            )
         except Exception as e:
             logger.error("Summarization failed for chunk id=%d: %s", row_id, e)
             summary = content[:300]  # fallback: first 300 chars

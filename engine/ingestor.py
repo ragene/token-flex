@@ -15,13 +15,56 @@ import json
 import logging
 import os
 import re
-import sqlite3
 import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+_COST_TABLE: dict[str, tuple[float, float]] = {
+    "claude-haiku-4-5":        (0.80,  4.00),
+    "claude-haiku-3-5":        (0.80,  4.00),
+    "claude-3-haiku-20240307": (0.25,  1.25),
+}
+
+
+def _record_token_usage_safe(
+    operation: str,
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    source_label: Optional[str] = None,
+) -> None:
+    """Write a token_usage row to the local DB using DATABASE_URL from env. Best-effort."""
+    try:
+        db_url = os.environ.get("DATABASE_URL", "")
+        if not db_url:
+            db_path = os.environ.get("TOKEN_FLOW_DB", "/home/ec2-user/.openclaw/data/token_flow.db")
+            db_url = f"sqlite:///{db_path}"
+        from db.pg_compat import connect as pg_connect
+        rates = _COST_TABLE.get(model)
+        cost = None
+        if rates:
+            cost = round(
+                (prompt_tokens / 1_000_000) * rates[0]
+                + (completion_tokens / 1_000_000) * rates[1],
+                6,
+            )
+        conn = pg_connect(db_url)
+        try:
+            conn.execute(
+                """INSERT INTO token_usage
+                   (operation, model, prompt_tokens, completion_tokens, total_tokens, cost_usd, source_label)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (operation, model, prompt_tokens, completion_tokens,
+                 prompt_tokens + completion_tokens, cost, source_label),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.debug("_record_token_usage_safe failed (non-fatal): %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +96,12 @@ Return ONLY valid JSON, no markdown."""
             max_tokens=300,
             messages=[{"role": "user", "content": prompt}]
         )
+        _record_token_usage_safe(
+            operation="ingest_summarize",
+            model="claude-haiku-4-5",
+            prompt_tokens=msg.usage.input_tokens,
+            completion_tokens=msg.usage.output_tokens,
+        )
         raw = msg.content[0].text.strip()
         raw = re.sub(r'^```json?\s*', '', raw)
         raw = re.sub(r'\s*```$', '', raw)
@@ -71,7 +120,7 @@ Return ONLY valid JSON, no markdown."""
 # Chunk pipeline helper
 # ---------------------------------------------------------------------------
 
-def _run_chunk_pipeline_raw(conn: sqlite3.Connection, source_label: str, content: str,
+def _run_chunk_pipeline_raw(conn, source_label: str, content: str,
                              context_hint: str = "") -> int:
     """
     Chunk + score raw file content directly into chunk_cache without a memory_entries row.
@@ -110,7 +159,7 @@ def _run_chunk_pipeline_raw(conn: sqlite3.Connection, source_label: str, content
     return len(scored)
 
 
-def _run_chunk_pipeline(conn: sqlite3.Connection, memory_entry_id: int, content: str) -> int:
+def _run_chunk_pipeline(conn, memory_entry_id: int, content: str) -> int:
     """
     Run chunk → score → persist for the given memory entry content.
     Inserts rows into chunk_cache with source_id = memory_entry_id.
@@ -264,7 +313,7 @@ def find_claude_cli_sessions() -> list[Path]:
 # Ingest functions
 # ---------------------------------------------------------------------------
 
-def ingest_memory_file(conn: sqlite3.Connection, filepath: Path, context_hint: str = "") -> tuple[int, int]:
+def ingest_memory_file(conn, filepath: Path, context_hint: str = "") -> tuple[int, int]:
     """
     Parse a memory markdown file into sections and store each in memory_entries.
     After insertion, automatically runs the chunk pipeline.
@@ -322,7 +371,7 @@ def ingest_memory_file(conn: sqlite3.Connection, filepath: Path, context_hint: s
 
 
 def ingest_git_history(
-    conn: sqlite3.Connection,
+    conn,
     workspace: Path,
     context_hint: str = "",
     since: str = "24 hours ago",
@@ -411,6 +460,12 @@ Return ONLY valid JSON, no markdown."""
             max_tokens=350,
             messages=[{"role": "user", "content": prompt}]
         )
+        _record_token_usage_safe(
+            operation="ingest_git",
+            model="claude-haiku-4-5",
+            prompt_tokens=msg.usage.input_tokens,
+            completion_tokens=msg.usage.output_tokens,
+        )
         raw = msg.content[0].text.strip()
         raw = re.sub(r'^```json?\s*', '', raw)
         raw = re.sub(r'\s*```$', '', raw)
@@ -449,7 +504,7 @@ Return ONLY valid JSON, no markdown."""
 
 
 def ingest_session_file(
-    conn: sqlite3.Connection,
+    conn,
     filepath: Path,
     context_hint: str = "",
 ) -> tuple[int, int]:
@@ -538,7 +593,7 @@ def ingest_session_file(
 # Query and rebuild
 # ---------------------------------------------------------------------------
 
-def query_context(conn: sqlite3.Connection, top_n: int = 20, min_relevance: float = 0.5) -> list:
+def query_context(conn, top_n: int = 20, min_relevance: float = 0.5) -> list:
     """Query top-N most relevant memory entries."""
     rows = conn.execute(
         """
@@ -553,7 +608,7 @@ def query_context(conn: sqlite3.Connection, top_n: int = 20, min_relevance: floa
     return rows
 
 
-def rebuild_memory(conn: sqlite3.Connection, output_path: Path, top_n: int = 20) -> int:
+def rebuild_memory(conn, output_path: Path, top_n: int = 20) -> int:
     """
     Rebuild memory file from top-scoring DB entries.
     Writes distilled markdown to output_path.
@@ -590,6 +645,6 @@ def rebuild_memory(conn: sqlite3.Connection, output_path: Path, top_n: int = 20)
     output_path.write_text("\n".join(lines))
     logger.info("Rebuilt memory written to %s (%d entries)", output_path, len(rows))
 
-    conn.execute("UPDATE memory_entries SET last_used = datetime('now') WHERE relevance >= 0.5")
+    conn.execute("UPDATE memory_entries SET last_used = NOW() WHERE relevance >= 0.5")
     conn.commit()
     return len(rows)
