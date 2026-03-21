@@ -11,8 +11,9 @@ import logging
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
-from api.routers import health, ingest, chunks, summaries, memory
+from api.routers import health, ingest, chunks, summaries, memory, token_data
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,15 @@ def create_app(db_path: str) -> FastAPI:
         redoc_url="/redoc",
     )
 
+    # CORS — allow the token-flow-ui and any local dev origins
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     # Store db_path on app.state for use in request handlers
     app.state.db_path = db_path
 
@@ -50,6 +60,7 @@ def create_app(db_path: str) -> FastAPI:
     app.include_router(chunks.router)
     app.include_router(summaries.router)
     app.include_router(memory.router)
+    app.include_router(token_data.router)
 
     logger.info("token-flow app created (db=%s)", db_path)
     return app

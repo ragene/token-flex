@@ -9,6 +9,23 @@ import sqlite3
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript("""
+        -- AI / LLM call token usage log
+        CREATE TABLE IF NOT EXISTS token_usage (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_email        TEXT,
+            operation         TEXT NOT NULL,
+            model             TEXT,
+            prompt_tokens     INTEGER DEFAULT 0,
+            completion_tokens INTEGER DEFAULT 0,
+            total_tokens      INTEGER DEFAULT 0,
+            cost_usd          REAL,
+            source_label      TEXT,
+            created_at        TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_tok_op      ON token_usage(operation);
+        CREATE INDEX IF NOT EXISTS idx_tok_email   ON token_usage(user_email);
+        CREATE INDEX IF NOT EXISTS idx_tok_created ON token_usage(created_at DESC);
+
         CREATE TABLE IF NOT EXISTS memory_entries (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             source_file TEXT NOT NULL,
@@ -44,5 +61,25 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_source    ON chunk_cache(source_id);
         CREATE INDEX IF NOT EXISTS idx_unpushed  ON chunk_cache(pushed_to_s3_at)
             WHERE pushed_to_s3_at IS NULL;
+
+        -- FreightDawg token usage mirror (synced from FreightDawg API)
+        CREATE TABLE IF NOT EXISTS fd_token_usage (
+            id                   INTEGER PRIMARY KEY,
+            user_id              INTEGER,
+            user_email           TEXT,
+            operation            TEXT,
+            chunk_id             TEXT,
+            model                TEXT,
+            prompt_tokens        INTEGER DEFAULT 0,
+            completion_tokens    INTEGER DEFAULT 0,
+            total_tokens         INTEGER DEFAULT 0,
+            cost_usd             REAL,
+            metadata_json        TEXT,
+            created_at           TEXT,
+            synced_at            TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_fd_tok_op     ON fd_token_usage(operation);
+        CREATE INDEX IF NOT EXISTS idx_fd_tok_email  ON fd_token_usage(user_email);
+        CREATE INDEX IF NOT EXISTS idx_fd_tok_created ON fd_token_usage(created_at DESC);
     """)
     conn.commit()
