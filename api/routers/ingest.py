@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from db.schema import init_db
 from engine.chunker import chunk_text
 from engine.scorer import score_chunks
+from api.push_client import push_snapshot
 
 router = APIRouter(tags=["ingest"])
 
@@ -72,6 +73,9 @@ async def ingest(body: IngestRequest, request: Request) -> IngestResponse:
                 )
         finally:
             conn.close()
+
+        # Push updated snapshot to the token-flow-ui (best-effort)
+        push_snapshot(db_path)
 
         return IngestResponse(chunks_created=chunks_created, avg_composite_score=0.0)
 
@@ -135,6 +139,9 @@ async def ingest(body: IngestRequest, request: Request) -> IngestResponse:
         if scored
         else 0.0
     )
+
+    # Push updated snapshot to the token-flow-ui (best-effort)
+    push_snapshot(db_path)
 
     return IngestResponse(
         chunks_created=len(scored),

@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from engine.summarizer import summarize_top_chunks
 from engine.s3_uploader import push_summaries_to_s3
+from api.push_client import push_snapshot
 
 router = APIRouter(tags=["summaries"])
 
@@ -72,6 +73,10 @@ async def run_summarize(body: SummarizeRequest, request: Request) -> SummarizeRe
             pushed = push_summaries_to_s3(conn, bucket=bucket)
     finally:
         conn.close()
+
+    # Push updated snapshot to token-flow-ui after summarization (best-effort)
+    if summarized > 0:
+        push_snapshot(db_path)
 
     return SummarizeResponse(summarized=summarized, pushed=pushed)
 
