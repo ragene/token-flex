@@ -4,38 +4,29 @@ FROM python:3.11-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     git \
+    libpq-dev \
     && rm -rf /var/lib/apt/lists/*
-
-# Install Python deps
-RUN pip install --no-cache-dir \
-    "fastapi>=0.111" \
-    "uvicorn[standard]>=0.29" \
-    "anthropic>=0.25" \
-    "boto3>=1.34" \
-    "tiktoken>=0.7" \
-    "python-dotenv>=1.0"
 
 WORKDIR /app
 
-# App dirs
-RUN mkdir -p /app/data
+# Install Python deps from requirements.txt (includes psycopg2-binary)
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
 # Copy app source
 COPY . /app/
 
-RUN chmod +x /app/manage.sh /app/docker-push.sh
+RUN chmod +x /app/manage.sh /app/start.sh /app/docker-push.sh 2>/dev/null || true
 
-ENV TOKEN_FLOW_DB=/app/data/token_flow.db
 ENV WORKSPACE=/app
 ENV MEMORY_DIR=/app/memory
 ENV SESSIONS_DIR=/app/sessions
 ENV S3_BUCKET=smart-memory
-ENV TOKEN_FLOW_PORT=8001
 ENV PORT=8001
 
 EXPOSE 8001
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:8001/health || exit 1
 
-CMD ["python3", "/app/main.py"]
+CMD ["/app/start.sh"]

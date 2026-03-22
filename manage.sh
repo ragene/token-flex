@@ -116,8 +116,81 @@ for p in [
     fi
     ;;
 
+  start-poller)
+    POLLER_PID_FILE="/tmp/token-flow-poller.pid"
+    POLLER_LOG_FILE="/tmp/token-flow-poller.log"
+
+    if [[ -f "$POLLER_PID_FILE" ]] && kill -0 "$(cat "$POLLER_PID_FILE")" 2>/dev/null; then
+      echo "⚠️  SQS poller already running (PID $(cat "$POLLER_PID_FILE"))"
+      exit 0
+    fi
+
+    # Resolve ANTHROPIC_API_KEY same as start
+    if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
+      _key=$(python3 -c "
+import json, pathlib
+for p in ['~/.openclaw/agents/main/agent/auth-profiles.json']:
+    try:
+        data = json.loads(pathlib.Path(p).expanduser().read_text())
+        for name, prof in data.get('profiles', {}).items():
+            if 'anthropic' in name.lower():
+                k = prof.get('key', '')
+                if k.startswith('sk-ant'):
+                    print(k); raise SystemExit(0)
+    except SystemExit: raise
+    except: pass
+" 2>/dev/null)
+      [[ -n "$_key" ]] && export ANTHROPIC_API_KEY="$_key"
+    fi
+
+    _WORKSPACE="${WORKSPACE:-/home/ec2-user/.openclaw/workspace}"
+    _MEMORY_DIR="${MEMORY_DIR:-/home/ec2-user/.openclaw/workspace/memory}"
+    _QUEUE_URL="${MEMORY_DISTILL_QUEUE_URL:-https://sqs.us-west-2.amazonaws.com/531948420901/freightdawg-memory-distill}"
+    _API_URL="${TOKEN_FLOW_API_URL:-http://localhost:${PORT}}"
+
+    nohup env \
+      ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
+      WORKSPACE="${_WORKSPACE}" \
+      MEMORY_DIR="${_MEMORY_DIR}" \
+      MEMORY_DISTILL_QUEUE_URL="${_QUEUE_URL}" \
+      TOKEN_FLOW_API_URL="${_API_URL}" \
+      python3 "${SCRIPT_DIR}/memory_distill.py" poll-sqs \
+        --output "${_MEMORY_DIR}/distilled.md" \
+        --context-hint "FreightDawg SoCal freight dispatch app on AWS ECS" \
+      >> "$POLLER_LOG_FILE" 2>&1 &
+    echo $! > "$POLLER_PID_FILE"
+    sleep 1
+    if kill -0 "$(cat "$POLLER_PID_FILE")" 2>/dev/null; then
+      echo "✅ SQS poller started (PID $(cat "$POLLER_PID_FILE"))"
+      echo "   Queue : ${_QUEUE_URL}"
+      echo "   Logs  : ${POLLER_LOG_FILE}"
+    else
+      echo "❌ SQS poller failed to start. Check ${POLLER_LOG_FILE}"
+      exit 1
+    fi
+    ;;
+
+  stop-poller)
+    POLLER_PID_FILE="/tmp/token-flow-poller.pid"
+    if [[ -f "$POLLER_PID_FILE" ]] && kill -0 "$(cat "$POLLER_PID_FILE")" 2>/dev/null; then
+      kill "$(cat "$POLLER_PID_FILE")" && rm -f "$POLLER_PID_FILE"
+      echo "✅ SQS poller stopped."
+    else
+      echo "ℹ️  SQS poller not running."
+    fi
+    ;;
+
+  status-poller)
+    POLLER_PID_FILE="/tmp/token-flow-poller.pid"
+    if [[ -f "$POLLER_PID_FILE" ]] && kill -0 "$(cat "$POLLER_PID_FILE")" 2>/dev/null; then
+      echo "✅ SQS poller running (PID $(cat "$POLLER_PID_FILE"))"
+    else
+      echo "❌ SQS poller not running."
+    fi
+    ;;
+
   *)
-    echo "Usage: $0 [start|stop|restart|status|install-deps]"
+    echo "Usage: $0 [start|stop|restart|status|install-deps|start-poller|stop-poller|status-poller]"
     exit 1
     ;;
 esac
