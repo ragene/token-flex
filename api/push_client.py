@@ -308,16 +308,10 @@ def push_snapshot(
         body = json.dumps(data).encode()
         headers = {"Content-Type": "application/json"}
         try:
-            from datetime import datetime as _dt, timedelta
-            from jose import jwt as _jwt
-            secret = os.environ.get("SECRET_KEY", "dev-secret-change-me")
-            svc_token = _jwt.encode(
-                {"sub": "service", "role": "admin", "exp": _dt.utcnow() + timedelta(minutes=5)},
-                secret, algorithm="HS256",
-            )
-            headers["Authorization"] = f"Bearer {svc_token}"
+            from api.device_auth import get_token as _get_token
+            headers["Authorization"] = f"Bearer {_get_token()}"
         except Exception:
-            pass
+            pass   # best-effort — push without auth if device auth unavailable
         req = urllib.request.Request(
             endpoint,
             data=body,
