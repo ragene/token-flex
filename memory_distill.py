@@ -476,30 +476,63 @@ def _find_claude_cli_sessions() -> list:
 
 def run_distill_and_clear(args_ns):
     """
-    Run a full ingest+rebuild cycle then clear token_usage via the token-flow API.
+    Run a full ingest+rebuild cycle then clear session files and token_usage.
     Called by the SQS poller on each trigger message.
     """
-    import subprocess, sys
+    import subprocess, sys, shutil
+    from datetime import datetime as _dt
 
+    # ── 1. Distill memory ────────────────────────────────────────────────────
     cmd = [sys.executable, __file__, "full",
            "--output", args_ns.output,
            "--context-hint", args_ns.context_hint,
            "--top", str(args_ns.top)]
     if args_ns.git_since:
         cmd += ["--git-since", args_ns.git_since]
-    print(f"  Running: {' '.join(cmd)}")
+    print(f"  Running distill: {' '.join(cmd)}")
     result = subprocess.run(cmd)
     if result.returncode != 0:
         print(f"  ⚠️  Distill subprocess exited with code {result.returncode}")
 
-    # Call DELETE /token-data/clear on the token-flow service
+    # ── 2. Clear session .jsonl files (archive then truncate) ────────────────
+    sessions_dir = Path(os.environ.get(
+        "SESSIONS_DIR",
+        Path.home() / ".openclaw/agents/main/sessions"
+    ))
+    archive_dir = sessions_dir / "archived"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    stamp = _dt.utcnow().strftime("%Y%m%dT%H%M%S")
+
+    cleared = 0
+    if sessions_dir.exists():
+        for f in sessions_dir.glob("*.jsonl"):
+            try:
+                dest = archive_dir / f"{f.stem}_{stamp}.jsonl"
+                shutil.copy2(f, dest)
+                f.write_text("")   # truncate in place so the file still exists
+                cleared += 1
+                print(f"  Cleared session: {f.name} → archived/{dest.name}")
+            except Exception as e:
+                print(f"  ⚠️  Could not clear {f.name}: {e}")
+    print(f"  ✅ {cleared} session file(s) cleared")
+
+    # ── 3. Clear memory .md files for today ──────────────────────────────────
+    from datetime import date as _date
+    mem_dir = Path(os.environ.get("MEMORY_DIR",
+                                  "/home/ec2-user/.openclaw/workspace/memory"))
+    today_md = mem_dir / f"{_date.today().isoformat()}.md"
+    if today_md.exists():
+        today_md.write_text(
+            f"# Memory — {today_md.stem}\n\n"
+            f"*Cleared after distillation on {_dt.utcnow().strftime('%Y-%m-%d %H:%M UTC')}.*\n"
+        )
+        print(f"  ✅ Cleared memory file: {today_md.name}")
+
+    # ── 4. Clear token_usage rows via API ────────────────────────────────────
     api_url = os.environ.get("TOKEN_FLOW_API_URL", "http://localhost:8001")
     try:
         import urllib.request
-        req = urllib.request.Request(
-            f"{api_url}/token-data/clear",
-            method="DELETE",
-        )
+        req = urllib.request.Request(f"{api_url}/token-data/clear", method="DELETE")
         with urllib.request.urlopen(req, timeout=10) as r:
             body = r.read().decode()
             print(f"  ✅ token_usage cleared: {body}")
