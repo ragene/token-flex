@@ -276,43 +276,6 @@ async def current_session(request: Request) -> CurrentSessionOut:
     )
 
 
-@router.post("/session/identify", status_code=200, dependencies=[])
-async def identify_local_session(body: IdentifyRequest, request: Request) -> dict:
-    """
-    Called by the local service at startup to register the authenticated user.
-    Upserts a local_sessions row so the dashboard can show who is running the local service.
-    """
-    import socket
-    host = body.host or socket.gethostname()
-    try:
-        db_url = request.app.state.database_url
-        from db.pg_compat import connect as pg_connect
-        from db.schema import init_db
-        conn = pg_connect(db_url)
-        init_db(conn)
-        # Upsert: update existing row for this email or insert new
-        existing = conn.execute(
-            "SELECT id FROM local_sessions WHERE email = %s", (body.email,)
-        ).fetchone()
-        if existing:
-            conn.execute(
-                """UPDATE local_sessions
-                   SET name=%s, picture=%s, auth0_sub=%s, host=%s, session_id=%s, last_seen=NOW()
-                   WHERE email=%s""",
-                (body.name, body.picture, body.auth0_sub, host, body.session_id, body.email),
-            )
-        else:
-            conn.execute(
-                """INSERT INTO local_sessions (email, name, picture, auth0_sub, host, session_id)
-                   VALUES (%s, %s, %s, %s, %s, %s)""",
-                (body.email, body.name, body.picture, body.auth0_sub, host, body.session_id),
-            )
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"DB error: {e}")
-
-    return {"status": "ok", "email": body.email, "name": body.name, "host": host}
 
 
 @router.get("/session/stream")

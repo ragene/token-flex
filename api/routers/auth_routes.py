@@ -338,3 +338,49 @@ async def device_flow_poll(request: Request):
         "name":         name,
         "role":         role,
     }
+
+
+# ── /session/identify — no auth required (called by local service at startup) ─
+
+class _IdentifyRequest(BaseModel):
+    email: str
+    name: Optional[str] = None
+    picture: Optional[str] = None
+    auth0_sub: Optional[str] = None
+    host: Optional[str] = None
+    session_id: Optional[str] = None
+
+from pydantic import BaseModel as _BaseModel  # already imported above, alias for clarity
+
+@router.post("/session/identify", status_code=200)
+async def identify_local_session(body: _IdentifyRequest, request: Request) -> dict:
+    """
+    Called by the local token-flow service at startup to register the authenticated user.
+    No auth required — the local service has already authenticated via Auth0 device flow.
+    """
+    import socket
+    host = body.host or socket.gethostname()
+    try:
+        from api.db_helper import get_conn
+        conn = get_conn(request)
+        existing = conn.execute(
+            "SELECT id FROM local_sessions WHERE email = %s", (body.email,)
+        ).fetchone()
+        if existing:
+            conn.execute(
+                """UPDATE local_sessions
+                   SET name=%s, picture=%s, auth0_sub=%s, host=%s, session_id=%s, last_seen=NOW()
+                   WHERE email=%s""",
+                (body.name, body.picture, body.auth0_sub, host, body.session_id, body.email),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO local_sessions (email, name, picture, auth0_sub, host, session_id)
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
+                (body.email, body.name, body.picture, body.auth0_sub, host, body.session_id),
+            )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"DB error: {e}")
+    return {"status": "ok", "email": body.email, "name": body.name, "host": host}
