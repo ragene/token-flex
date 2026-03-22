@@ -130,27 +130,53 @@ def _build_token_data() -> dict:
             return 0
 
     session_files = list(sessions_dir.glob("*.jsonl")) if sessions_dir.exists() else []
-    session_tokens = sum(_approx(f) for f in session_files)
+    # Identify the active session ID from sessions.json so we can track it separately
+    _active_sid = None
+    try:
+        import json as _j
+        _sj = sessions_dir / "sessions.json"
+        if _sj.exists():
+            _meta = _j.loads(_sj.read_text(errors="ignore"))
+            _sm = _meta.get("agent:main:main") or next(iter(_meta.values()), {})
+            _active_sid = _sm.get("sessionId")
+    except Exception:
+        pass
+
+    _active_tokens = 0
+    _idle_tokens = 0
+    for f in session_files:
+        t = _approx(f)
+        if _active_sid and f.stem == _active_sid:
+            _active_tokens = t
+        else:
+            _idle_tokens += t
+    session_tokens = _active_tokens + _idle_tokens
+
     today = datetime.utcnow().date().isoformat()
     memory_tokens = _approx(memory_dir / f"{today}.md")
     total = session_tokens + memory_tokens
 
-    if total >= distill:
-        status, msg = "critical", f"⚠️ Context very large (~{total:,} tokens). Distill NOW."
-    elif total >= warn:
-        status, msg = "warning", f"🟡 Context growing (~{total:,} tokens). Consider distilling."
+    # Status is based on idle (clearable) sessions + memory only.
+    # The active session grows continuously and shouldn't trigger a distill alarm by itself.
+    clearable = _idle_tokens + memory_tokens
+    if clearable >= distill:
+        status, msg = "critical", f"⚠️ Clearable context large (~{clearable:,} tokens). Distill NOW."
+    elif clearable >= warn:
+        status, msg = "warning", f"🟡 Clearable context growing (~{clearable:,} tokens). Consider distilling."
     else:
-        status, msg = "ok", f"✅ Context healthy (~{total:,} tokens)."
+        status, msg = "ok", f"✅ Context healthy (~{clearable:,} clearable tokens). Active session: ~{_active_tokens:,} tokens."
 
     return {
-        "total_tokens_approx": total,
-        "session_tokens":      session_tokens,
-        "memory_tokens":       memory_tokens,
-        "session_files":       len(session_files),
-        "status":              status,
-        "message":             msg,
-        "warn_threshold":      warn,
-        "distill_threshold":   distill,
+        "total_tokens_approx":   total,
+        "session_tokens":        session_tokens,
+        "active_session_tokens": _active_tokens,
+        "idle_session_tokens":   _idle_tokens,
+        "memory_tokens":         memory_tokens,
+        "session_files":         len(session_files),
+        "status":                status,
+        "message":               msg,
+        "warn_threshold":        warn,
+        "distill_threshold":     distill,
     }
 
 
