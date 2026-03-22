@@ -525,7 +525,19 @@ def run_distill_and_clear(args_ns, triggered_by: str = "unknown", auth_token: st
     if args_ns.git_since:
         cmd += ["--git-since", args_ns.git_since]
     print(f"  Running distill: {' '.join(cmd)}")
-    result = subprocess.run(cmd)
+    # Forward critical env vars to the subprocess so it can find session files,
+    # memory dir, DB, etc. — without this SESSIONS_DIR is empty and session
+    # transcripts are silently skipped.
+    _sub_env = os.environ.copy()
+    _sessions_dir_val = os.environ.get(
+        "SESSIONS_DIR",
+        str(Path.home() / ".openclaw/agents/main/sessions")
+    )
+    _sub_env.setdefault("SESSIONS_DIR", _sessions_dir_val)
+    _sub_env.setdefault("MEMORY_DIR",   os.environ.get("MEMORY_DIR",   str(Path.home() / ".openclaw/workspace/memory")))
+    _sub_env.setdefault("WORKSPACE",    os.environ.get("WORKSPACE",    str(Path.home() / ".openclaw/workspace")))
+    _sub_env.setdefault("TOKEN_FLOW_DB", os.environ.get("TOKEN_FLOW_DB", str(Path.home() / ".openclaw/data/token_flow.db")))
+    result = subprocess.run(cmd, env=_sub_env)
     if result.returncode != 0:
         print(f"  ⚠️  Distill subprocess exited with code {result.returncode}")
 
