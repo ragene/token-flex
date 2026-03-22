@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Starts the token-flow API + SQS distill poller as sibling processes.
 # The API is the primary process; the poller exits if the API exits.
-set -euo pipefail
+# Note: do NOT use set -e here — a crashing poller must not take down the API.
+set -uo pipefail
 
 echo "🚀 Starting token-flow API on port ${PORT:-8001}..."
 python3 /app/main.py &
