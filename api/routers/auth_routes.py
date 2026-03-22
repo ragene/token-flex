@@ -78,62 +78,36 @@ def exchange_auth0_token(
 
     # Get DB connection via the standard app pattern
     conn = get_conn(request)
-    # In local/SQLite mode there's no admin approval workflow — any Auth0-validated
-    # user is automatically an active admin on the local service.
-    _is_local = getattr(request.app.state, "database_url", "").startswith("sqlite")
     try:
-        # Check if user exists
+        # Upsert: always activate and set role=admin on /auth/exchange.
+        # Auth0 token validation above IS the security gate — if you have a valid
+        # Auth0 token you're in. The is_active/approval workflow only applies to the
+        # remote UI (managed separately via /users/ admin endpoints).
         cur = conn.execute(
-            "SELECT id, role, is_active FROM tf_users WHERE email = %s",
+            "SELECT id, role FROM tf_users WHERE email = %s",
             (email,)
         )
         row = cur.fetchone()
 
         if row is None:
-            # Check if this is the very first user — bootstrap as admin if so
-            count_cur = conn.execute("SELECT COUNT(*) FROM tf_users")
-            count_row = count_cur.fetchone()
-            total_users = count_row[0] if count_row else 0
-
-            if total_users == 0 or _is_local:
-                # First user ever, OR local mode — make them admin and activate immediately
-                cur = conn.execute(
-                    """INSERT INTO tf_users (email, name, auth0_sub, role, is_active, last_login)
-                       VALUES (%s, %s, %s, 'admin', TRUE, NOW())
-                       RETURNING id, role, is_active""",
-                    (email, name, auth0_sub)
-                )
-            else:
-                # Normal new SSO user on remote/Postgres — pending approval
-                cur = conn.execute(
-                    """INSERT INTO tf_users (email, name, auth0_sub, role, is_active, last_login)
-                       VALUES (%s, %s, %s, 'viewer', FALSE, NOW())
-                       RETURNING id, role, is_active""",
-                    (email, name, auth0_sub)
-                )
+            cur = conn.execute(
+                """INSERT INTO tf_users (email, name, auth0_sub, role, is_active, last_login)
+                   VALUES (%s, %s, %s, 'admin', TRUE, NOW())
+                   RETURNING id, role""",
+                (email, name, auth0_sub)
+            )
             row = cur.fetchone()
         else:
-            # In local mode, always ensure the user is active/admin (handles stale local DBs)
-            if _is_local:
-                conn.execute(
-                    "UPDATE tf_users SET auth0_sub=%s, last_login=NOW(), name=%s, is_active=TRUE, role='admin' WHERE email=%s",
-                    (auth0_sub, name, email)
-                )
-            else:
-                conn.execute(
-                    "UPDATE tf_users SET auth0_sub=%s, last_login=NOW(), name=%s WHERE email=%s",
-                    (auth0_sub, name, email)
-                )
+            conn.execute(
+                "UPDATE tf_users SET auth0_sub=%s, last_login=NOW(), name=%s, is_active=TRUE WHERE email=%s",
+                (auth0_sub, name, email)
+            )
         conn.commit()
 
         user_id = row[0]
-        role = row[1] if not _is_local else "admin"
-        is_active = True if _is_local else row[2]
+        role = row[1]
     finally:
         conn.close()
-
-    if not is_active:
-        raise HTTPException(status_code=403, detail="Your account is pending admin approval.")
 
     internal = create_access_token({
         "sub": str(user_id),
@@ -300,48 +274,29 @@ async def device_flow_poll(request: Request):
     if not email:
         raise HTTPException(status_code=400, detail="No email in Auth0 userinfo")
 
-    _is_local = getattr(request.app.state, "database_url", "").startswith("sqlite")
     conn = get_conn(request)
     try:
-        cur = conn.execute("SELECT id, role, is_active FROM tf_users WHERE email = %s", (email,))
+        # Same upsert logic as /auth/exchange — always activate on successful Auth0 login
+        cur = conn.execute("SELECT id, role FROM tf_users WHERE email = %s", (email,))
         row = cur.fetchone()
         if row is None:
-            count_row = conn.execute("SELECT COUNT(*) FROM tf_users").fetchone()
-            is_first  = (count_row[0] if count_row else 0) == 0
-            # Local mode or first user — always activate as admin
-            if is_first or _is_local:
-                role_val  = "admin"
-                is_active = True
-            else:
-                role_val  = "viewer"
-                is_active = False
             cur = conn.execute(
                 """INSERT INTO tf_users (email, name, auth0_sub, role, is_active, last_login)
-                   VALUES (%s, %s, %s, %s, %s, NOW())
-                   RETURNING id, role, is_active""",
-                (email, name, auth0_sub, role_val, is_active),
+                   VALUES (%s, %s, %s, 'admin', TRUE, NOW())
+                   RETURNING id, role""",
+                (email, name, auth0_sub),
             )
             row = cur.fetchone()
         else:
-            if _is_local:
-                conn.execute(
-                    "UPDATE tf_users SET auth0_sub=%s, last_login=NOW(), name=%s, is_active=TRUE, role='admin' WHERE email=%s",
-                    (auth0_sub, name, email),
-                )
-            else:
-                conn.execute(
-                    "UPDATE tf_users SET auth0_sub=%s, last_login=NOW(), name=%s WHERE email=%s",
-                    (auth0_sub, name, email),
-                )
+            conn.execute(
+                "UPDATE tf_users SET auth0_sub=%s, last_login=NOW(), name=%s, is_active=TRUE WHERE email=%s",
+                (auth0_sub, name, email),
+            )
         conn.commit()
-        user_id   = row[0]
-        role      = row[1] if not _is_local else "admin"
-        is_active = True if _is_local else row[2]
+        user_id = row[0]
+        role    = row[1]
     finally:
         conn.close()
-
-    if not is_active:
-        raise HTTPException(status_code=403, detail="Your account is pending admin approval.")
 
     internal = create_access_token({
         "sub":   str(user_id),
