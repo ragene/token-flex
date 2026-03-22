@@ -71,6 +71,154 @@ def _load_push_cache(database_url: str) -> dict | None:
     return None
 
 
+def _build_tokens_and_session(database_url: str) -> tuple[dict, dict]:
+    """
+    Compute the `tokens` and `session` dicts that the Dashboard WS consumer
+    expects (snap.tokens / snap.session).  Mirrors the logic in the
+    GET /tokens and GET /session/current HTTP endpoints so the WS snapshot
+    is self-contained even without a push from the local service.
+    """
+    import json as _j
+    from pathlib import Path
+
+    WARN_THRESHOLD    = int(os.environ.get("SMART_MEMORY_WARN_TOKENS",   "30000"))
+    DISTILL_THRESHOLD = int(os.environ.get("SMART_MEMORY_DISTILL_TOKENS", "30000"))
+    SESSIONS_DIR = Path(os.environ.get(
+        "SESSIONS_DIR", Path.home() / ".openclaw/agents/main/sessions"
+    ))
+    MEMORY_DIR = Path(os.environ.get(
+        "MEMORY_DIR", "/home/ec2-user/.openclaw/workspace/memory"
+    ))
+
+    def _approx(p: Path) -> int:
+        try:
+            return len(p.read_text(errors="ignore")) // 4
+        except Exception:
+            return 0
+
+    # ── tokens ───────────────────────────────────────────────────────────────
+    session_files  = list(SESSIONS_DIR.glob("*.jsonl")) if SESSIONS_DIR.exists() else []
+    session_tokens = sum(_approx(f) for f in session_files)
+
+    from datetime import date as _date
+    today = _date.today().isoformat()
+    mem_file = MEMORY_DIR / f"{today}.md"
+    memory_tokens = _approx(mem_file) if mem_file.exists() else 0
+    total = session_tokens + memory_tokens
+
+    if total >= DISTILL_THRESHOLD:
+        status = "critical"
+        msg = f"⚠️ Context is very large (~{total:,} tokens). Distill NOW."
+    elif total >= WARN_THRESHOLD:
+        status = "warning"
+        msg = f"🟡 Context growing (~{total:,} tokens). Consider distilling soon."
+    else:
+        status = "ok"
+        msg = f"✅ Context healthy (~{total:,} tokens)."
+
+    # Chunk cache counts
+    cached_chunks = 0
+    cached_chunk_tokens = 0
+    try:
+        c = pg_connect(database_url)
+        init_db(c)
+        crow = c.execute(
+            "SELECT COUNT(*), COALESCE(SUM(token_count),0) FROM chunk_cache"
+        ).fetchone()
+        c.close()
+        cached_chunks = int(crow[0] or 0)
+        cached_chunk_tokens = int(crow[1] or 0)
+    except Exception:
+        pass
+
+    tokens = {
+        "total_tokens_approx":   total,
+        "session_tokens":        session_tokens,
+        "memory_tokens":         memory_tokens,
+        "session_files":         len(session_files),
+        "status":                status,
+        "message":               msg,
+        "warn_threshold":        WARN_THRESHOLD,
+        "distill_threshold":     DISTILL_THRESHOLD,
+        "cached_chunks":         cached_chunks,
+        "cached_chunk_tokens":   cached_chunk_tokens,
+    }
+
+    # ── session ───────────────────────────────────────────────────────────────
+    session: dict = {
+        "session_id": None, "session_file": None,
+        "token_count_approx": 0, "message_count": 0,
+        "channel": None, "started_at": None, "last_updated_at": None,
+        "user_email": None, "user_name": None,
+        "user_picture": None, "user_last_seen": None,
+    }
+    try:
+        sessions_json = SESSIONS_DIR / "sessions.json"
+        if sessions_json.exists():
+            meta = _j.loads(sessions_json.read_text(errors="ignore"))
+            session_meta = next(iter(meta.values()), {}) if meta else {}
+            sid = session_meta.get("sessionId")
+            channel = (
+                session_meta.get("lastChannel")
+                or session_meta.get("deliveryContext", {}).get("channel")
+            )
+            updated_ms = session_meta.get("updatedAt")
+            last_updated_at = None
+            if updated_ms:
+                from datetime import datetime as _dt, timezone as _tz
+                last_updated_at = _dt.fromtimestamp(
+                    updated_ms / 1000, tz=_tz.utc
+                ).isoformat()
+
+            session.update({"channel": channel, "last_updated_at": last_updated_at})
+
+            if sid:
+                sf = SESSIONS_DIR / f"{sid}.jsonl"
+                session["session_id"] = sid
+                session["session_file"] = str(sf)
+                if sf.exists():
+                    raw = sf.read_text(errors="ignore")
+                    session["token_count_approx"] = len(raw) // 4
+                    mc = 0
+                    started_at = None
+                    for line in raw.splitlines():
+                        if not line.strip():
+                            continue
+                        try:
+                            obj = _j.loads(line)
+                        except Exception:
+                            continue
+                        t = obj.get("type", "")
+                        if t == "session" and started_at is None:
+                            started_at = obj.get("timestamp")
+                        if t in ("human", "assistant", "say", "message"):
+                            mc += 1
+                    session["message_count"] = mc
+                    session["started_at"] = started_at
+
+        # Enrich with local_sessions identity
+        try:
+            c2 = pg_connect(database_url)
+            init_db(c2)
+            row = c2.execute(
+                "SELECT email, name, picture, last_seen FROM local_sessions ORDER BY last_seen DESC LIMIT 1"
+            ).fetchone()
+            c2.close()
+            if row:
+                session.update({
+                    "user_email":     row[0],
+                    "user_name":      row[1],
+                    "user_picture":   row[2],
+                    "user_last_seen": str(row[3]) if row[3] else None,
+                })
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    return tokens, session
+
+
 def _build_snapshot(database_url: str) -> dict:
     """Read current state from DB and return a snapshot dict."""
     c = pg_connect(database_url)
@@ -150,8 +298,12 @@ def _build_snapshot(database_url: str) -> dict:
     finally:
         c.close()
 
+    tokens, session = _build_tokens_and_session(database_url)
+
     return {
         "ts": datetime.utcnow().isoformat() + "Z",
+        "tokens":  tokens,
+        "session": session,
         "summary": {
             "rows": summary_rows,
             "grand_total_tokens": grand_tokens,
