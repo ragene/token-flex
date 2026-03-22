@@ -29,9 +29,9 @@ $DEFAULT_TF_AUTH   = Join-Path $HOME_DIR ".openclaw\tf_auth.json"
 # ── Helpers ───────────────────────────────────────────────────────────────────
 function Is-Running {
     if (-not (Test-Path $PID_FILE)) { return $false }
-    $storedPid = Get-Content $PID_FILE -ErrorAction SilentlyContinue
-    if (-not $storedPid) { return $false }
-    return $null -ne (Get-Process -Id $storedPid -ErrorAction SilentlyContinue)
+    $pid = Get-Content $PID_FILE -ErrorAction SilentlyContinue
+    if (-not $pid) { return $false }
+    return $null -ne (Get-Process -Id $pid -ErrorAction SilentlyContinue)
 }
 
 function Pid-On-Port {
@@ -62,34 +62,39 @@ function Resolve-ApiKey {
         Write-Host "   API key: found in environment"
         return
     }
-    $authJson = $DEFAULT_AUTH_JSON.Replace('\','/')
-    $pyScript = @'
-import json, pathlib, sys
-for p in [sys.argv[1]]:
+    $key = python3 -c @"
+import json, pathlib
+for p in ['$($DEFAULT_AUTH_JSON.Replace('\','\\'))']:
     try:
         data = json.loads(pathlib.Path(p).read_text())
-        for name, prof in data.get("profiles", {}).items():
-            if "anthropic" in name.lower():
-                k = prof.get("key", "")
-                if k.startswith("sk-ant"):
-                    print(k); sys.exit(0)
+        for name, prof in data.get('profiles', {}).items():
+            if 'anthropic' in name.lower():
+                k = prof.get('key', '')
+                if k.startswith('sk-ant'):
+                    print(k); raise SystemExit(0)
     except SystemExit: raise
     except: pass
-'@
-    $key = python -c $pyScript $authJson 2>$null
+"@ 2>$null
     if ($key) {
         $env:ANTHROPIC_API_KEY = $key.Trim()
         Write-Host "   API key: resolved from OpenClaw auth-profiles"
     } else {
-        Write-Host "   WARNING: ANTHROPIC_API_KEY not found -- Claude summarization will use fallback mode"
+        Write-Host "   WARNING: ANTHROPIC_API_KEY not found — Claude summarization will use fallback mode"
         Write-Host "   Set it with: `$env:ANTHROPIC_API_KEY='sk-ant-...' before running start"
     }
 }
 
 function Resolve-TfJwt {
-    $authPath = $DEFAULT_TF_AUTH.Replace('\','/')
-    $pyCode = 'import json, pathlib, time; p = pathlib.Path(r"' + $authPath + '"); d = json.loads(p.read_text()); print(d["token"]) if time.time() < d.get("expires_at", 0) - 60 else None'
-    $jwt = python -c $pyCode 2>$null
+    $jwt = python3 -c @"
+import json, pathlib, time
+p = pathlib.Path('$($DEFAULT_TF_AUTH.Replace('\','\\'))')
+try:
+    d = json.loads(p.read_text())
+    if time.time() < d.get('expires_at', 0) - 60:
+        print(d['token'])
+except Exception:
+    pass
+"@ 2>$null
     return $jwt
 }
 
@@ -97,7 +102,7 @@ function Resolve-TfJwt {
 switch ($Command) {
 
     "install-deps" {
-        pip install -q "fastapi>=0.111" "uvicorn[standard]>=0.29" "anthropic>=0.25" "boto3>=1.34" "tiktoken>=0.7" "python-dotenv>=1.0"
+        pip3 install -q "fastapi>=0.111" "uvicorn[standard]>=0.29" "anthropic>=0.25" "boto3>=1.34" "tiktoken>=0.7" "python-dotenv>=1.0"
         Write-Host "✅ Dependencies installed."
     }
 
@@ -138,7 +143,6 @@ switch ($Command) {
             SECRET_KEY         = "$($env:SECRET_KEY)"
             TOKEN_FLOW_UI_URL  = "$($env:TOKEN_FLOW_UI_URL)"
             PYTHONUNBUFFERED   = "1"
-            PYTHONIOENCODING   = "utf-8"
         }
 
         # Set env vars for child process
@@ -146,46 +150,17 @@ switch ($Command) {
             [System.Environment]::SetEnvironmentVariable($kv.Key, $kv.Value, "Process")
         }
 
-        # Find python executable path
-        $pythonExe = (Get-Command python -ErrorAction SilentlyContinue).Source
-        if (-not $pythonExe) {
-            Write-Host "ERROR: python not found in PATH"
-            exit 1
-        }
-
-        Write-Host "   Python : $pythonExe"
-        Write-Host "   Script : $SERVER_SCRIPT"
-        Write-Host "   Logs   : $LOG_FILE"
-
-        # Build a .bat launcher that sets env and runs python with combined output
-        $launcherBat = Join-Path $TMP_DIR "token-flow-launcher.bat"
-        $batLines = @("@echo off", "cd /d `"$SCRIPT_DIR`"")
-        foreach ($kv in $procEnv.GetEnumerator()) {
-            $batLines += "set `"$($kv.Key)=$($kv.Value)`""
-        }
-        $batLines += "`"$pythonExe`" -u `"$SERVER_SCRIPT`" > `"$LOG_FILE`" 2>&1"
-        $batLines -join "`r`n" | Set-Content $launcherBat -Encoding ASCII
-
-        $proc = Start-Process cmd.exe -ArgumentList "/c `"$launcherBat`"" `
-            -WindowStyle Hidden -PassThru
-
-        if (-not $proc -or $proc.Id -eq 0) {
-            Write-Host "ERROR: Failed to start process"
-            exit 1
-        }
-
+        $proc = Start-Process python3 -ArgumentList "-u `"$SERVER_SCRIPT`"" `
+            -RedirectStandardOutput $LOG_FILE -RedirectStandardError $LOG_FILE `
+            -NoNewWindow -PassThru
         $proc.Id | Set-Content $PID_FILE
-        Write-Host "   PID    : $($proc.Id)"
-        Write-Host "   Waiting for service to become healthy..."
 
+        Write-Host "   Waiting for service to become healthy..."
         $deadline = (Get-Date).AddSeconds(120)
         $ready = $false
         while ((Get-Date) -lt $deadline) {
-            if ($proc.HasExited) {
-                Write-Host "ERROR: Process exited before becoming healthy."
-                Write-Host "--- log tail ---"
-                Start-Sleep -Seconds 1
-                Get-Content $LOG_FILE -ErrorAction SilentlyContinue | Select-Object -Last 25
+            if (-not (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue)) {
+                Write-Host "❌ Process exited before becoming healthy. Check $LOG_FILE"
                 exit 1
             }
             try {
@@ -196,20 +171,18 @@ switch ($Command) {
         }
 
         if ($ready) {
-            Write-Host "token-flow started (PID $($proc.Id)) on http://localhost:$PORT"
-            Write-Host "   View logs: Get-Content '$LOG_FILE' -Tail 30 -Wait"
+            Write-Host "✅ token-flow started (PID $($proc.Id)) on port $PORT"
+            Write-Host "   Logs: $LOG_FILE"
         } else {
-            Write-Host "ERROR: Service did not become healthy within 120s."
-            Write-Host "--- log tail ---"
-            Get-Content $LOG_FILE -ErrorAction SilentlyContinue | Select-Object -Last 25
+            Write-Host "❌ Service did not become healthy within 120s. Check $LOG_FILE"
             exit 1
         }
     }
 
     "stop" {
         if (Is-Running) {
-            $storedPid = Get-Content $PID_FILE
-            Stop-Process -Id $storedPid -Force
+            $pid = Get-Content $PID_FILE
+            Stop-Process -Id $pid -Force
             Remove-Item $PID_FILE -ErrorAction SilentlyContinue
             Write-Host "✅ token-flow stopped."
         } else {
@@ -228,7 +201,7 @@ switch ($Command) {
             Write-Host "✅ token-flow running (PID $(Get-Content $PID_FILE)) on http://localhost:$PORT"
             try {
                 $r = Invoke-WebRequest "http://localhost:$PORT/health" -UseBasicParsing -ErrorAction Stop
-                $r.Content | python -m json.tool 2>$null
+                $r.Content | python3 -m json.tool 2>$null
             } catch {}
         } else {
             Write-Host "❌ token-flow not running."
@@ -271,9 +244,8 @@ switch ($Command) {
 
         $pollerScript = Join-Path $SCRIPT_DIR "memory_distill.py"
         $args = "-u `"$pollerScript`" poll-sqs --output `"$mem\distilled.md`" --context-hint `"FreightDawg SoCal freight dispatch app on AWS ECS`""
-        $POLLER_ERR_LOG = $POLLER_LOG -replace '\.log$', '-err.log'
-        $proc = Start-Process python -ArgumentList $args `
-            -RedirectStandardOutput $POLLER_LOG -RedirectStandardError $POLLER_ERR_LOG `
+        $proc = Start-Process python3 -ArgumentList $args `
+            -RedirectStandardOutput $POLLER_LOG -RedirectStandardError $POLLER_LOG `
             -NoNewWindow -PassThru
         $proc.Id | Set-Content $POLLER_PID
         Start-Sleep -Seconds 1
