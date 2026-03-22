@@ -3,6 +3,24 @@
 # The API is the primary process; the poller exits if the API exits.
 set -euo pipefail
 
+# ── SSO Auth Gate ─────────────────────────────────────────────────────────────
+# Authenticate the user via Auth0 Device Flow before starting any service.
+# If a valid cached token exists it completes silently; otherwise a URL is
+# printed for the user to visit in their browser.
+echo "🔐 Authenticating with Auth0 SSO..."
+python3 - <<'PYEOF'
+import sys, os
+sys.path.insert(0, "/app")
+try:
+    from api.device_auth import get_token
+    get_token()
+    print("✅ Authenticated — starting services")
+except Exception as e:
+    print(f"❌ Authentication failed: {e}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+# ─────────────────────────────────────────────────────────────────────────────
+
 echo "🚀 Starting token-flow API on port ${PORT:-8001}..."
 python3 /app/main.py &
 API_PID=$!

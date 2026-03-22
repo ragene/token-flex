@@ -553,8 +553,26 @@ def poll_sqs(args_ns):
       MEMORY_DISTILL_QUEUE_URL  — SQS queue URL
       TOKEN_FLOW_API_URL        — token-flow service base URL (default: http://localhost:8001)
       AWS_REGION                — defaults to us-west-2
+
+    SSO auth is required before polling starts. If no valid cached token exists,
+    the Auth0 Device Flow is triggered — a URL is printed for the user to visit.
     """
     import boto3
+
+    # ── SSO Auth Gate ─────────────────────────────────────────────────────────
+    # When launched via start.sh the user already authenticated; this is a
+    # safety net for direct invocations. If no cached token exists we run the
+    # full device flow (URL printed to stdout). On failure we exit immediately.
+    print("[SQS poller] Checking authentication...")
+    try:
+        from api.device_auth import get_token
+        get_token()
+        print("[SQS poller] ✅ Authenticated — starting poller")
+    except Exception as e:
+        print(f"[SQS poller] ❌ Authentication failed: {e}")
+        print("[SQS poller] Cannot start without valid SSO credentials. Exiting.")
+        import sys
+        sys.exit(1)
 
     queue_url = os.environ.get(
         "MEMORY_DISTILL_QUEUE_URL",
