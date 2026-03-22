@@ -442,18 +442,19 @@ SQS_QUEUE_URL = os.environ.get(
 AWS_REGION = os.environ.get("AWS_REGION", "us-west-2")
 
 
-@router.post("/token-data/distill", status_code=202)
-async def trigger_distill(
-    request: Request,
-    token_payload: Optional[dict] = Depends(verify_token),
-) -> dict:
+@router.post("/token-data/distill", status_code=202, dependencies=[Depends(verify_token)])
+async def trigger_distill(request: Request) -> dict:
     """
     Publish a distill_and_clear message to the SQS queue.
     The local smart-memory service polls this queue and runs memory_distill.py full + clears token_usage.
-    The authenticated user's email is included in the SQS message so the poller
-    can attribute the distill to the right user in pipeline_events.
+    Accepts optional { "triggered_by": "name or email" } in the request body for attribution.
     """
-    triggered_by = (token_payload or {}).get("email") or "unknown"
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    triggered_by = (body.get("triggered_by") or "").strip() or "unknown"
     try:
         import boto3
         sqs = boto3.client("sqs", region_name=AWS_REGION)
