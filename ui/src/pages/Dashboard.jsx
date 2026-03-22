@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
+import { useAuth0 } from '@auth0/auth0-react'
 import { getTokens, postDistillAndClear } from '../api.js'
 import StatusBadge from '../components/StatusBadge.jsx'
 import TokenMeter from '../components/TokenMeter.jsx'
@@ -17,6 +18,7 @@ function StatCard({ label, value, sub, color }) {
 }
 
 export default function Dashboard() {
+  const { user, isAuthenticated, loginWithPopup } = useAuth0()
   const [data, setData]               = useState(null)
   const [error, setError]             = useState(null)
   const [lastUpdated, setLastUpdated] = useState(null)
@@ -41,16 +43,31 @@ export default function Dashboard() {
   }, [fetchData])
 
   const handleDistill = async () => {
-    const identity = window.prompt('Enter your name or email to confirm distill & clear:')
-    if (!identity || !identity.trim()) return
+    let identity
 
-    if (!window.confirm(`Trigger distill & clear as "${identity.trim()}"? This will summarize session memory and reset token usage.`)) return
+    if (isAuthenticated && user?.email) {
+      // Use Google identity silently
+      identity = user.email
+      if (!window.confirm(`Trigger distill & clear as ${user.name || user.email}? This will summarize session memory and reset token usage.`)) return
+    } else {
+      // Not logged in — trigger Google login first
+      try {
+        await loginWithPopup({ authorizationParams: { connection: 'google-oauth2' } })
+        return // after login, user will click again and hit the authenticated path
+      } catch (e) {
+        // If popup blocked or user cancelled, fall back to prompt
+        identity = window.prompt('Enter your name or email to confirm distill & clear:')
+        if (!identity || !identity.trim()) return
+        identity = identity.trim()
+        if (!window.confirm(`Trigger distill & clear as "${identity}"? This will summarize session memory and reset token usage.`)) return
+      }
+    }
 
     setDistilling(true)
     setDistillResult(null)
     try {
-      const res = await postDistillAndClear(identity.trim())
-      setDistillResult({ ok: true, msg: res.message || `Distill job queued (triggered by ${identity.trim()}).` })
+      const res = await postDistillAndClear(identity)
+      setDistillResult({ ok: true, msg: res.message || `Distill job queued (triggered by ${identity}).` })
     } catch (err) {
       setDistillResult({ ok: false, msg: err?.response?.data?.detail || err.message || 'Request failed.' })
     } finally {
@@ -63,6 +80,12 @@ export default function Dashboard() {
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24 }}>
         <h1 style={{ fontSize: 24, fontWeight: 700, color: '#fff' }}>📊 Dashboard</h1>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          {isAuthenticated && user && (
+            <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              {user.picture && <img src={user.picture} alt="" style={{ width: 22, height: 22, borderRadius: '50%' }} />}
+              <span style={{ fontSize: 12, color: '#888' }}>{user.name || user.email}</span>
+            </span>
+          )}
           {lastUpdated && (
             <span style={{ fontSize: 12, color: '#555' }}>
               Updated {lastUpdated.toLocaleTimeString()}
