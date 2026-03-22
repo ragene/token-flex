@@ -8,17 +8,27 @@ echo "🚀 Starting token-flow API on port ${PORT:-8001}..."
 python3 /app/main.py &
 API_PID=$!
 
-echo "🔄 Starting SQS distill poller..."
-python3 /app/memory_distill.py poll-sqs \
-  --output "${MEMORY_DIR:-/app/memory}/distilled.md" \
-  --context-hint "${CONTEXT_HINT:-FreightDawg SoCal freight dispatch app on AWS ECS}" &
-POLLER_PID=$!
+if [[ "${DISABLE_SQS_POLLER:-false}" == "true" ]]; then
+  echo "⏭  SQS poller disabled (DISABLE_SQS_POLLER=true) — skipping"
+  POLLER_PID=""
+else
+  echo "🔄 Starting SQS distill poller..."
+  python3 /app/memory_distill.py poll-sqs \
+    --output "${MEMORY_DIR:-/app/memory}/distilled.md" \
+    --context-hint "${CONTEXT_HINT:-FreightDawg SoCal freight dispatch app on AWS ECS}" &
+  POLLER_PID=$!
+fi
 
 echo "   API PID   : $API_PID"
-echo "   Poller PID: $POLLER_PID"
+echo "   Poller PID: ${POLLER_PID:-disabled}"
 
 # If either process exits, kill the other and exit
 wait_any() {
+  if [[ -z "${POLLER_PID:-}" ]]; then
+    # No poller — just wait for API
+    wait $API_PID
+    return
+  fi
   while kill -0 $API_PID 2>/dev/null && kill -0 $POLLER_PID 2>/dev/null; do
     sleep 5
   done
