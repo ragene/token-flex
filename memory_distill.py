@@ -646,7 +646,14 @@ def run_distill_and_clear(args_ns, triggered_by: str = "unknown", auth_token: st
     # ── 5. Log distill event to pipeline_events ───────────────────────────────
     try:
         from api.push_client import log_pipeline_event
-        db_path = str(DB_PATH)
+        # Same fix as step 6 — use TOKEN_FLOW_DB, not the memory context.db
+        db_path = os.environ.get(
+            "DATABASE_URL",
+            os.environ.get(
+                "TOKEN_FLOW_DB",
+                "/home/ec2-user/.openclaw/data/token_flow.db",
+            ),
+        )
         log_pipeline_event(db_path, "distill", {
             "triggered_by": triggered_by,
             "cleared_sessions": cleared,
@@ -659,7 +666,17 @@ def run_distill_and_clear(args_ns, triggered_by: str = "unknown", auth_token: st
     # ── 6. Push fresh snapshot so UI reflects the clear immediately ───────────
     try:
         from api.push_client import push_snapshot
-        push_snapshot(str(DB_PATH))
+        # Use TOKEN_FLOW_DB (token_flow.db / Postgres) — that's where token_usage
+        # rows live.  DB_PATH points to the memory context.db which has no
+        # token_usage table, so pushing from it always produced empty summaries.
+        _tf_db = os.environ.get(
+            "DATABASE_URL",
+            os.environ.get(
+                "TOKEN_FLOW_DB",
+                "/home/ec2-user/.openclaw/data/token_flow.db",
+            ),
+        )
+        push_snapshot(_tf_db)
         print(f"  ✅ Pushed fresh snapshot to UI after distill+clear")
     except Exception as e:
         print(f"  ⚠️  Could not push post-distill snapshot: {e}")
