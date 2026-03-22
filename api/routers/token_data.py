@@ -444,6 +444,18 @@ async def token_data_ws(websocket: WebSocket, token: Optional[str] = None) -> No
         initial = _build_snapshot(database_url, user_email=user_email)
         await websocket.send_text(_json.dumps(initial, default=_json_default))
 
+        # If push_cache was empty (first connect after cold start), kick the local
+        # push loop to fire immediately so the client gets real data fast.
+        if _load_push_cache(database_url) is None:
+            try:
+                import threading
+                from api.push_client import push_snapshot as _push_now
+                threading.Thread(
+                    target=_push_now, args=(database_url,), daemon=True
+                ).start()
+            except Exception:
+                pass
+
         # Wait for client pings or disconnect.
         # We do NOT run a server-initiated periodic push loop here — the local service
         # already pushes a fresh snapshot every 30s via POST /token-data/push, which
@@ -481,17 +493,21 @@ async def push_snapshot(body: PushSnapshotIn, request: Request) -> dict:
         payload["ts"] = datetime.utcnow().isoformat() + "Z"
 
     # Persist to DB so new WS connections get real data after ECS restarts.
-    # Use DELETE+INSERT (works on both SQLite and PostgreSQL) instead of
-    # ON CONFLICT ... EXCLUDED which SQLite doesn't support.
+    # UPDATE first (no gap), INSERT if no row exists yet.
     try:
         database_url: str = request.app.state.database_url
         conn = _conn(request)
         try:
-            conn.execute("DELETE FROM push_cache WHERE id = 1")
-            conn.execute(
-                "INSERT INTO push_cache (id, payload, updated_at) VALUES (1, ?, NOW())",
-                (_json.dumps(payload),),
+            payload_json = _json.dumps(payload)
+            cur = conn.execute(
+                "UPDATE push_cache SET payload = ?, updated_at = NOW() WHERE id = 1",
+                (payload_json,),
             )
+            if cur.rowcount == 0:
+                conn.execute(
+                    "INSERT INTO push_cache (id, payload, updated_at) VALUES (1, ?, NOW())",
+                    (payload_json,),
+                )
             conn.commit()
         finally:
             conn.close()

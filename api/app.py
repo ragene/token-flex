@@ -117,13 +117,13 @@ def create_app(database_url: str) -> FastAPI:
         if _has_local_sessions:
             async def _session_push_loop():
                 from api.push_client import push_snapshot
-                await asyncio.sleep(5)  # brief startup delay
+                await asyncio.sleep(2)  # brief startup delay
                 while True:
                     try:
                         push_snapshot(database_url)
                     except Exception as exc:
                         logger.debug("session push loop error (non-fatal): %s", exc)
-                    await asyncio.sleep(30)
+                    await asyncio.sleep(10)
 
             asyncio.create_task(_session_push_loop())
             logger.info("Background session push loop started (local sessions found)")
