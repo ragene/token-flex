@@ -565,12 +565,29 @@ def run_distill_and_clear(args_ns, triggered_by: str = "unknown", auth_token: st
 
     # ── 4. Clear token_usage rows ─────────────────────────────────────────────
     # Strategy:
-    #   a) If we have a pre-acquired JWT (passed from the SQS poller startup auth),
-    #      hit the API DELETE endpoint — this is the clean path.
-    #   b) If no JWT and SKIP_STARTUP_AUTH=true, skip device-flow entirely and
-    #      clear the DB directly via SQLAlchemy/psycopg2 using DATABASE_URL.
-    #      This avoids hanging on a browser prompt inside ECS.
-    # Prefer the remote ECS UI URL — that's where token_usage rows live in Postgres.
+    #   a) ALWAYS clear the local SQLite TOKEN_FLOW_DB first — that's where the
+    #      local service accumulates token_usage rows. This must happen regardless
+    #      of whether the remote API clear succeeds.
+    #   b) Also hit the remote ECS API (TOKEN_FLOW_UI_URL) to clear the Postgres
+    #      push_cache so the UI reflects zero immediately.
+    #   c) If no JWT and SKIP_STARTUP_AUTH=true, skip device-flow.
+
+    # ── 4a. Always clear local SQLite ────────────────────────────────────────
+    _local_db = os.environ.get("TOKEN_FLOW_DB", "/home/ec2-user/.openclaw/data/token_flow.db")
+    _local_db_url = f"sqlite:///{_local_db}" if not _local_db.startswith("sqlite") else _local_db
+    print(f"  🗄️  Clearing local token_usage (SQLite: {_local_db})...")
+    try:
+        import sqlite3 as _sqlite3
+        _lc = _sqlite3.connect(_local_db_url.replace("sqlite:///", ""))
+        _lcount = _lc.execute("SELECT COUNT(*) FROM token_usage").fetchone()[0]
+        _lc.execute("DELETE FROM token_usage")
+        _lc.commit()
+        _lc.close()
+        print(f"  ✅ Deleted {_lcount} local token_usage rows from SQLite")
+    except Exception as e:
+        print(f"  ⚠️  Local SQLite clear failed: {e}")
+
+    # ── 4b. Also clear remote ECS Postgres via API (best-effort) ─────────────
     _remote_url = os.environ.get("TOKEN_FLOW_UI_URL", "").rstrip("/")
     api_url = _remote_url or os.environ.get("TOKEN_FLOW_API_URL", "http://localhost:8001")
     _cleared_via_api = False
@@ -578,7 +595,7 @@ def run_distill_and_clear(args_ns, triggered_by: str = "unknown", auth_token: st
     if auth_token:
         try:
             import urllib.request
-            print("  🔐 Clearing token_usage via API (pre-acquired token)...")
+            print("  🔐 Clearing remote token_usage via API (pre-acquired token)...")
             req = urllib.request.Request(
                 f"{api_url}/token-data/clear",
                 method="DELETE",
@@ -586,43 +603,32 @@ def run_distill_and_clear(args_ns, triggered_by: str = "unknown", auth_token: st
             )
             with urllib.request.urlopen(req, timeout=10) as r:
                 body = r.read().decode()
-                print(f"  ✅ token_usage cleared via API: {body}")
+                print(f"  ✅ Remote token_usage cleared via API: {body}")
             _cleared_via_api = True
         except Exception as e:
-            print(f"  ⚠️  API clear failed ({e}) — falling back to direct DB clear")
+            print(f"  ⚠️  Remote API clear failed ({e}) — local SQLite already cleared above")
 
     if not _cleared_via_api:
         _skip_auth = os.environ.get("SKIP_STARTUP_AUTH", "").lower() in ("1", "true", "yes")
         db_url = os.environ.get("DATABASE_URL", "")
 
-        if db_url:
-            # Direct DB clear — works when running inside ECS with DATABASE_URL set
-            print("  🗄️  Clearing token_usage directly via DATABASE_URL...")
+        if db_url and db_url.startswith("postgresql"):
+            # Direct Postgres clear — works when DATABASE_URL is set (ECS env)
+            print("  🗄️  Clearing remote token_usage directly via DATABASE_URL...")
             try:
-                import re as _re
-                if db_url.startswith("postgresql"):
-                    import psycopg2
-                    conn_str = db_url.replace("postgresql+psycopg2://", "postgresql://")
-                    conn_db = psycopg2.connect(conn_str)
-                    cur = conn_db.cursor()
-                    cur.execute("SELECT COUNT(*) FROM token_usage")
-                    count = cur.fetchone()[0]
-                    cur.execute("DELETE FROM token_usage")
-                    conn_db.commit()
-                    cur.close()
-                    conn_db.close()
-                    print(f"  ✅ Deleted {count} token_usage rows directly from DB")
-                else:
-                    # SQLite fallback
-                    import sqlite3 as _sqlite3
-                    c = _sqlite3.connect(db_url.replace("sqlite:///", ""))
-                    count = c.execute("SELECT COUNT(*) FROM token_usage").fetchone()[0]
-                    c.execute("DELETE FROM token_usage")
-                    c.commit()
-                    c.close()
-                    print(f"  ✅ Deleted {count} token_usage rows from SQLite DB")
+                import psycopg2
+                conn_str = db_url.replace("postgresql+psycopg2://", "postgresql://")
+                conn_db = psycopg2.connect(conn_str)
+                cur = conn_db.cursor()
+                cur.execute("SELECT COUNT(*) FROM token_usage")
+                count = cur.fetchone()[0]
+                cur.execute("DELETE FROM token_usage")
+                conn_db.commit()
+                cur.close()
+                conn_db.close()
+                print(f"  ✅ Deleted {count} remote token_usage rows from Postgres")
             except Exception as e:
-                print(f"  ⚠️  Direct DB clear failed: {e}")
+                print(f"  ⚠️  Direct Postgres clear failed: {e}")
         elif not _skip_auth:
             # Last resort: try device flow auth + API call
             try:
@@ -639,9 +645,9 @@ def run_distill_and_clear(args_ns, triggered_by: str = "unknown", auth_token: st
                     body = r.read().decode()
                     print(f"  ✅ token_usage cleared via API (SSO): {body}")
             except Exception as e:
-                print(f"  ⚠️  Could not clear token_usage via API: {e}")
+                print(f"  ⚠️  Could not clear remote token_usage via API: {e}")
         else:
-            print("  ⚠️  No DATABASE_URL and SKIP_STARTUP_AUTH=true — token_usage NOT cleared")
+            print("  ℹ️  No remote DATABASE_URL / JWT — only local SQLite was cleared")
 
     # ── 5. Log distill event to pipeline_events ───────────────────────────────
     try:
