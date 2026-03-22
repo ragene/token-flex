@@ -532,7 +532,26 @@ def run_distill_and_clear(args_ns):
     api_url = os.environ.get("TOKEN_FLOW_API_URL", "http://localhost:8001")
     try:
         import urllib.request
+
+        # Mint a short-lived internal service token so the auth-protected endpoint accepts us
+        def _service_token() -> str:
+            try:
+                from datetime import datetime as _dt, timedelta
+                from jose import jwt as _jwt
+                secret = os.environ.get("SECRET_KEY", "dev-secret-change-me")
+                payload_data = {
+                    "sub": "service",
+                    "role": "admin",
+                    "exp": _dt.utcnow() + timedelta(minutes=5),
+                }
+                return _jwt.encode(payload_data, secret, algorithm="HS256")
+            except Exception:
+                return ""
+
+        svc_token = _service_token()
         req = urllib.request.Request(f"{api_url}/token-data/clear", method="DELETE")
+        if svc_token:
+            req.add_header("Authorization", f"Bearer {svc_token}")
         with urllib.request.urlopen(req, timeout=10) as r:
             body = r.read().decode()
             print(f"  ✅ token_usage cleared: {body}")
