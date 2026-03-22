@@ -479,88 +479,106 @@ async def push_snapshot(body: PushSnapshotIn, request: Request) -> dict:
                    ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()""",
                 (_json.dumps(payload),),
             )
+            conn.commit()
 
             # ── 2. Upsert memory_entries from snapshot ────────────────────────
-            # Replace the whole set on each push (truncate then insert) so the
-            # table always mirrors the local SQLite state.
+            # Replace the whole set on each push so the table mirrors local SQLite.
             incoming_memory = payload.get("memory_entries") or []
             if incoming_memory:
-                conn.execute("DELETE FROM memory_entries")
-                for entry in incoming_memory:
-                    kw = entry.get("keywords")
-                    if isinstance(kw, list):
-                        kw = _json.dumps(kw)
-                    conn.execute(
-                        """INSERT INTO memory_entries
-                           (source_file, category, content, summary, keywords, relevance, created_at)
-                           VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, NOW()))""",
-                        (
-                            entry.get("source_file"),
-                            entry.get("category"),
-                            entry.get("content") or entry.get("summary") or "",
-                            entry.get("summary"),
-                            kw,
-                            float(entry.get("relevance") or 1.0),
-                            entry.get("created_at"),
-                        ),
-                    )
-                    mem_upserted += 1
+                try:
+                    conn.execute("DELETE FROM memory_entries")
+                    for entry in incoming_memory:
+                        kw = entry.get("keywords")
+                        if isinstance(kw, list):
+                            kw = _json.dumps(kw)
+                        conn.execute(
+                            """INSERT INTO memory_entries
+                               (source_file, category, content, summary, keywords, relevance, created_at)
+                               VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, NOW()))""",
+                            (
+                                entry.get("source_file"),
+                                entry.get("category"),
+                                entry.get("content") or entry.get("summary") or "",
+                                entry.get("summary"),
+                                kw,
+                                float(entry.get("relevance") or 1.0),
+                                entry.get("created_at"),
+                            ),
+                        )
+                        mem_upserted += 1
+                    conn.commit()
+                except Exception as exc:
+                    log.warning("push: memory_entries upsert failed (non-fatal): %s", exc)
+                    try:
+                        conn._conn.rollback()
+                    except Exception:
+                        pass
 
             # ── 3. Append new pipeline_events ─────────────────────────────────
-            # Avoid duplicating events: only insert rows whose id doesn't exist yet.
-            # If the pushed event has no id (local SQLite uses its own sequence),
-            # always insert — dedup via a short time-window is acceptable.
             incoming_events = payload.get("pipeline_events") or []
             for ev in incoming_events:
-                detail = ev.get("detail") or {}
-                if isinstance(detail, dict):
-                    detail = _json.dumps(detail)
-                # Use INSERT … ON CONFLICT DO NOTHING if remote id provided
-                remote_id = ev.get("id")
-                if remote_id:
-                    conn.execute(
-                        """INSERT INTO pipeline_events (id, event_type, detail, created_at)
-                           VALUES (?, ?, ?, COALESCE(?, NOW()))
-                           ON CONFLICT (id) DO NOTHING""",
-                        (remote_id, ev.get("event_type", "ingest"), detail, ev.get("created_at")),
-                    )
-                else:
-                    conn.execute(
-                        """INSERT INTO pipeline_events (event_type, detail, created_at)
-                           VALUES (?, ?, COALESCE(?, NOW()))""",
-                        (ev.get("event_type", "ingest"), detail, ev.get("created_at")),
-                    )
-                event_inserted += 1
+                try:
+                    detail = ev.get("detail") or {}
+                    if isinstance(detail, dict):
+                        detail = _json.dumps(detail)
+                    remote_id = ev.get("id")
+                    if remote_id:
+                        conn.execute(
+                            """INSERT INTO pipeline_events (id, event_type, detail, created_at)
+                               VALUES (?, ?, ?, COALESCE(?, NOW()))
+                               ON CONFLICT (id) DO NOTHING""",
+                            (remote_id, ev.get("event_type", "ingest"), detail, ev.get("created_at")),
+                        )
+                    else:
+                        conn.execute(
+                            """INSERT INTO pipeline_events (event_type, detail, created_at)
+                               VALUES (?, ?, COALESCE(?, NOW()))""",
+                            (ev.get("event_type", "ingest"), detail, ev.get("created_at")),
+                        )
+                    conn.commit()
+                    event_inserted += 1
+                except Exception as exc:
+                    log.warning("push: pipeline_event insert failed (non-fatal): %s", exc)
+                    try:
+                        conn._conn.rollback()
+                    except Exception:
+                        pass
 
             # ── 4. Upsert chunk_cache from snapshot ───────────────────────────
-            # Same replace strategy as memory_entries.
             incoming_chunks = payload.get("chunks") or []
             if incoming_chunks:
-                conn.execute("DELETE FROM chunk_cache")
-                for ch in incoming_chunks:
-                    conn.execute(
-                        """INSERT INTO chunk_cache
-                           (source_label, chunk_index, content, token_count,
-                            fact_score, preference_score, intent_score, composite_score,
-                            summary, is_summarized, created_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, NOW()))""",
-                        (
-                            ch.get("source_label"),
-                            ch.get("chunk_index") or 0,
-                            ch.get("content") or "",
-                            ch.get("token_count") or 0,
-                            ch.get("fact_score") or 0.0,
-                            ch.get("preference_score") or 0.0,
-                            ch.get("intent_score") or 0.0,
-                            ch.get("composite_score") or 0.0,
-                            ch.get("summary"),
-                            1 if ch.get("is_summarized") else 0,
-                            ch.get("created_at"),
-                        ),
-                    )
-                    chunk_upserted += 1
+                try:
+                    conn.execute("DELETE FROM chunk_cache")
+                    for ch in incoming_chunks:
+                        conn.execute(
+                            """INSERT INTO chunk_cache
+                               (source_label, chunk_index, content, token_count,
+                                fact_score, preference_score, intent_score, composite_score,
+                                summary, is_summarized, created_at)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, NOW()))""",
+                            (
+                                ch.get("source_label"),
+                                ch.get("chunk_index") or 0,
+                                ch.get("content") or "",
+                                ch.get("token_count") or 0,
+                                ch.get("fact_score") or 0.0,
+                                ch.get("preference_score") or 0.0,
+                                ch.get("intent_score") or 0.0,
+                                ch.get("composite_score") or 0.0,
+                                ch.get("summary"),
+                                1 if ch.get("is_summarized") else 0,
+                                ch.get("created_at"),
+                            ),
+                        )
+                        chunk_upserted += 1
+                    conn.commit()
+                except Exception as exc:
+                    log.warning("push: chunk_cache upsert failed (non-fatal): %s", exc)
+                    try:
+                        conn._conn.rollback()
+                    except Exception:
+                        pass
 
-            conn.commit()
         finally:
             conn.close()
     except Exception as exc:
