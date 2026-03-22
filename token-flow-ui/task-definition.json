@@ -59,14 +59,42 @@
       ],
       "essential": true,
       "environment": [
-        { "name": "S3_BUCKET",           "value": "smart-memory" },
-        { "name": "AWS_DEFAULT_REGION",  "value": "us-west-2" },
-        { "name": "MEMORY_DIR",          "value": "/app/memory" },
-        { "name": "WORKSPACE",           "value": "/app" },
-        { "name": "PORT",                "value": "8001" },
-        { "name": "ECS_CLUSTER",         "value": "token-flow-ui" },
-        { "name": "ECS_SERVICE",         "value": "token-flow-ui" },
-        { "name": "TOKEN_FLOW_UI_URL",   "value": "https://token-flow.thefreightdawg.com" }
+        {
+          "name": "S3_BUCKET",
+          "value": "smart-memory"
+        },
+        {
+          "name": "AWS_DEFAULT_REGION",
+          "value": "us-west-2"
+        },
+        {
+          "name": "MEMORY_DIR",
+          "value": "/app/memory"
+        },
+        {
+          "name": "WORKSPACE",
+          "value": "/app"
+        },
+        {
+          "name": "PORT",
+          "value": "8001"
+        },
+        {
+          "name": "ECS_CLUSTER",
+          "value": "token-flow-ui"
+        },
+        {
+          "name": "ECS_SERVICE",
+          "value": "token-flow-ui"
+        },
+        {
+          "name": "TOKEN_FLOW_UI_URL",
+          "value": "https://token-flow.thefreightdawg.com"
+        },
+        {
+          "name": "SKIP_STARTUP_AUTH",
+          "value": "true"
+        }
       ],
       "secrets": [
         {
