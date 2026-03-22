@@ -43,13 +43,14 @@ def _load_cache() -> Optional[str]:
     return None
 
 
-def _save_cache(token: str, expires_in: int = 28800) -> None:
-    """Cache the internal JWT with an expiry timestamp."""
+def _save_cache(token: str, expires_in: int = 28800, user: Optional[dict] = None) -> None:
+    """Cache the internal JWT with an expiry timestamp and optional user info."""
     CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
     CACHE_PATH.write_text(json.dumps({
         "token": token,
         "expires_at": time.time() + expires_in,
         "cached_at": datetime.utcnow().isoformat(),
+        "user": user or {},
     }))
 
 
@@ -213,9 +214,31 @@ def get_token(force_refresh: bool = False) -> str:
             return cached
 
     auth0_token = _device_flow()
+
+    # Fetch userinfo from Auth0 and cache alongside the token
+    user: dict = {}
+    try:
+        req = urllib.request.Request(
+            f"https://{AUTH0_DOMAIN}/userinfo",
+            headers={"Authorization": f"Bearer {auth0_token}"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            user = json.loads(r.read().decode())
+    except Exception:
+        pass
+
     internal_token, expires_in = _exchange(auth0_token)
-    _save_cache(internal_token, expires_in)
+    _save_cache(internal_token, expires_in, user=user)
     return internal_token
+
+
+def get_cached_user() -> dict:
+    """Return the cached Auth0 user info dict, or {} if not available."""
+    try:
+        data = json.loads(CACHE_PATH.read_text())
+        return data.get("user", {})
+    except Exception:
+        return {}
 
 
 def clear_cache() -> None:

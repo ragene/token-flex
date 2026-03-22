@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { useAuth0 } from '@auth0/auth0-react'
-import { getTokens, postDistillAndClear } from '../api.js'
+import { getTokens, postDistillAndClear, getCurrentSession } from '../api.js'
 import StatusBadge from '../components/StatusBadge.jsx'
 import TokenMeter from '../components/TokenMeter.jsx'
 
@@ -20,6 +20,7 @@ function StatCard({ label, value, sub, color }) {
 export default function Dashboard() {
   const { user, isAuthenticated, loginWithPopup } = useAuth0()
   const [data, setData]               = useState(null)
+  const [session, setSession]         = useState(null)
   const [error, setError]             = useState(null)
   const [lastUpdated, setLastUpdated] = useState(null)
   const [distilling, setDistilling]   = useState(false)
@@ -27,8 +28,9 @@ export default function Dashboard() {
 
   const fetchData = useCallback(async () => {
     try {
-      const d = await getTokens()
+      const [d, s] = await Promise.all([getTokens(), getCurrentSession()])
       setData(d)
+      setSession(s)
       setLastUpdated(new Date())
       setError(null)
     } catch (e) {
@@ -165,6 +167,33 @@ export default function Dashboard() {
               <StatCard label="Cached Chunks" value={data.cached_chunks || 0}       color="#fbbf24" />
               <StatCard label="Cached Tokens" value={data.cached_chunk_tokens || 0} color="#fb923c" />
             </div>
+          </div>
+
+          {/* Local Service User */}
+          <div style={{ ...CARD, marginTop: 16 }}>
+            <div style={{ fontSize: 16, fontWeight: 600, color: '#fff', marginBottom: 16 }}>🖥️ Local Service</div>
+            {session?.user_email ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+                {session.user_picture
+                  ? <img src={session.user_picture} alt="" style={{ width: 40, height: 40, borderRadius: '50%', border: '2px solid #2a2a40' }} />
+                  : <div style={{ width: 40, height: 40, borderRadius: '50%', background: '#2a2a40', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18 }}>👤</div>
+                }
+                <div>
+                  <div style={{ color: '#fff', fontWeight: 600, fontSize: 15 }}>{session.user_name || session.user_email}</div>
+                  <div style={{ color: '#888', fontSize: 12 }}>{session.user_email}</div>
+                  {session.user_last_seen && (
+                    <div style={{ color: '#555', fontSize: 11, marginTop: 2 }}>
+                      Last seen {new Date(session.user_last_seen).toLocaleTimeString()}
+                    </div>
+                  )}
+                </div>
+                <div style={{ marginLeft: 'auto' }}>
+                  <span style={{ background: '#14532d', color: '#4ade80', fontSize: 11, padding: '2px 8px', borderRadius: 6, fontWeight: 600 }}>● Active</span>
+                </div>
+              </div>
+            ) : (
+              <div style={{ color: '#555', fontSize: 13 }}>No local service connected</div>
+            )}
           </div>
         </>
       )}

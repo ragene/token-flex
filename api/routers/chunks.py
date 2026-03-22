@@ -47,6 +47,20 @@ class CurrentSessionOut(BaseModel):
     channel: Optional[str]
     started_at: Optional[str]
     last_updated_at: Optional[str]
+    # Local service user identity (from POST /session/identify)
+    user_email: Optional[str] = None
+    user_name: Optional[str] = None
+    user_picture: Optional[str] = None
+    user_last_seen: Optional[str] = None
+
+
+class IdentifyRequest(BaseModel):
+    email: str
+    name: Optional[str] = None
+    picture: Optional[str] = None
+    auth0_sub: Optional[str] = None
+    host: Optional[str] = None
+    session_id: Optional[str] = None
 
 
 class ChunkOut(BaseModel):
@@ -234,11 +248,71 @@ async def current_session(request: Request) -> CurrentSessionOut:
         if t in ("human", "assistant", "say", "message"):
             message_count += 1
 
+    # Enrich with local service user identity
+    user_email = user_name = user_picture = user_last_seen = None
+    try:
+        db_url = request.app.state.database_url
+        from db.pg_compat import connect as pg_connect
+        from db.schema import init_db
+        uc = pg_connect(db_url)
+        init_db(uc)
+        row = uc.execute(
+            "SELECT email, name, picture, last_seen FROM local_sessions ORDER BY last_seen DESC LIMIT 1"
+        ).fetchone()
+        uc.close()
+        if row:
+            user_email, user_name, user_picture, user_last_seen = (
+                row[0], row[1], row[2], str(row[3]) if row[3] else None
+            )
+    except Exception:
+        pass
+
     return CurrentSessionOut(
         session_id=session_id, session_file=str(session_file),
         token_count_approx=token_count_approx, message_count=message_count,
         channel=channel, started_at=started_at, last_updated_at=last_updated_at,
+        user_email=user_email, user_name=user_name,
+        user_picture=user_picture, user_last_seen=user_last_seen,
     )
+
+
+@router.post("/session/identify", status_code=200)
+async def identify_local_session(body: IdentifyRequest, request: Request) -> dict:
+    """
+    Called by the local service at startup to register the authenticated user.
+    Upserts a local_sessions row so the dashboard can show who is running the local service.
+    """
+    import socket
+    host = body.host or socket.gethostname()
+    try:
+        db_url = request.app.state.database_url
+        from db.pg_compat import connect as pg_connect
+        from db.schema import init_db
+        conn = pg_connect(db_url)
+        init_db(conn)
+        # Upsert: update existing row for this email or insert new
+        existing = conn.execute(
+            "SELECT id FROM local_sessions WHERE email = %s", (body.email,)
+        ).fetchone()
+        if existing:
+            conn.execute(
+                """UPDATE local_sessions
+                   SET name=%s, picture=%s, auth0_sub=%s, host=%s, session_id=%s, last_seen=NOW()
+                   WHERE email=%s""",
+                (body.name, body.picture, body.auth0_sub, host, body.session_id, body.email),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO local_sessions (email, name, picture, auth0_sub, host, session_id)
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
+                (body.email, body.name, body.picture, body.auth0_sub, host, body.session_id),
+            )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"DB error: {e}")
+
+    return {"status": "ok", "email": body.email, "name": body.name, "host": host}
 
 
 @router.get("/session/stream")

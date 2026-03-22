@@ -115,6 +115,21 @@ _SCHEMA_SQL = """
     );
     CREATE INDEX IF NOT EXISTS idx_tf_users_email ON tf_users(email);
     CREATE INDEX IF NOT EXISTS idx_tf_users_sub   ON tf_users(auth0_sub);
+
+    -- Active local service session — tracks who is running the local service
+    CREATE TABLE IF NOT EXISTS local_sessions (
+        id          SERIAL PRIMARY KEY,
+        email       TEXT NOT NULL,
+        name        TEXT,
+        picture     TEXT,
+        auth0_sub   TEXT,
+        host        TEXT,
+        session_id  TEXT,
+        last_seen   TIMESTAMPTZ DEFAULT NOW(),
+        created_at  TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_local_sessions_email    ON local_sessions(email);
+    CREATE INDEX IF NOT EXISTS idx_local_sessions_last_seen ON local_sessions(last_seen DESC);
 """
 
 
@@ -210,6 +225,21 @@ _SCHEMA_SQL_SQLITE = """
     );
     CREATE INDEX IF NOT EXISTS idx_tf_users_email ON tf_users(email);
     CREATE INDEX IF NOT EXISTS idx_tf_users_sub   ON tf_users(auth0_sub);
+
+    -- Active local service session — tracks who is running the local service
+    CREATE TABLE IF NOT EXISTS local_sessions (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        email       TEXT NOT NULL,
+        name        TEXT,
+        picture     TEXT,
+        auth0_sub   TEXT,
+        host        TEXT,
+        session_id  TEXT,
+        last_seen   TEXT DEFAULT (datetime('now')),
+        created_at  TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_local_sessions_email     ON local_sessions(email);
+    CREATE INDEX IF NOT EXISTS idx_local_sessions_last_seen ON local_sessions(last_seen DESC);
 """
 
 

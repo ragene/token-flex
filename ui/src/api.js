@@ -4,7 +4,8 @@ const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8001'
 
 const api = axios.create({ baseURL: BASE_URL })
 
-export const getHealth        = () => api.get('/health').then(r => r.data)
+export const getHealth          = () => api.get('/health').then(r => r.data)
+export const getCurrentSession  = () => api.get('/session/current').then(r => r.data)
 export const getTokens        = () => api.get('/tokens').then(r => r.data)
 export const getChunks        = (params = {}) => api.get('/chunks', { params }).then(r => r.data)
 export const getSummaries     = (params = {}) => api.get('/summaries', { params }).then(r => r.data)
