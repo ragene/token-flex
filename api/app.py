@@ -104,18 +104,31 @@ def create_app(database_url: str) -> FastAPI:
         finally:
             conn2.close()
 
-        # Background task: push snapshot (including live session data) every 30s
-        async def _session_push_loop():
-            from api.push_client import push_snapshot
-            await asyncio.sleep(5)  # brief startup delay
-            while True:
-                try:
-                    push_snapshot(database_url)
-                except Exception as exc:
-                    logger.debug("session push loop error (non-fatal): %s", exc)
-                await asyncio.sleep(30)
+        # Background push loop: only run if local session files exist.
+        # In ECS there are no local session files — running the push loop there
+        # would POST a zero-data snapshot to /token-data/push every 30s, overwriting
+        # the good snapshot pushed by the real local service and blanking the UI.
+        # The local service (main.py) has its own push loop via a background thread.
+        sessions_dir_env = os.environ.get("SESSIONS_DIR", "")
+        from pathlib import Path
+        _sessions_dir = Path(sessions_dir_env) if sessions_dir_env else Path.home() / ".openclaw/agents/main/sessions"
+        _has_local_sessions = _sessions_dir.exists() and any(_sessions_dir.glob("*.jsonl"))
 
-        asyncio.create_task(_session_push_loop())
+        if _has_local_sessions:
+            async def _session_push_loop():
+                from api.push_client import push_snapshot
+                await asyncio.sleep(5)  # brief startup delay
+                while True:
+                    try:
+                        push_snapshot(database_url)
+                    except Exception as exc:
+                        logger.debug("session push loop error (non-fatal): %s", exc)
+                    await asyncio.sleep(30)
+
+            asyncio.create_task(_session_push_loop())
+            logger.info("Background session push loop started (local sessions found)")
+        else:
+            logger.info("Background session push loop skipped (no local sessions — running in ECS/remote mode)")
 
     logger.info("token-flow app created (db=PostgreSQL)")
     return app
