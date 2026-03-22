@@ -100,12 +100,48 @@ def _device_flow() -> str:
     print("\n  Waiting for you to authenticate...")
     print("="*60 + "\n")
 
-    # Auto-open browser
+    # Auto-open browser — try Chrome headless/GUI, fallback to webbrowser
     try:
-        import webbrowser
-        webbrowser.open(verification_url)
+        import subprocess as _sp
+        # Try to open Chrome. On SSH/headless, use --headless with remote-debugging
+        # so the user can see the page via their local browser pointed at the tunnel.
+        # First try: plain Chrome (works if DISPLAY is set or via forwarding)
+        chrome = None
+        for candidate in ["google-chrome", "google-chrome-stable", "chromium-browser", "chromium"]:
+            try:
+                _sp.run(["which", candidate], check=True, capture_output=True)
+                chrome = candidate
+                break
+            except Exception:
+                continue
+
+        if chrome:
+            import os as _os
+            display = _os.environ.get("DISPLAY", "")
+            if display:
+                # X forwarding available — open normally
+                _sp.Popen([chrome, "--no-sandbox", "--disable-gpu", verification_url],
+                          stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+                print("  🌐 Chrome opened in your X session.")
+            else:
+                # No display — launch with remote debugging port so user can connect
+                port = 9222
+                _sp.Popen([
+                    chrome,
+                    "--headless=new",
+                    "--no-sandbox",
+                    "--disable-gpu",
+                    f"--remote-debugging-port={port}",
+                    verification_url,
+                ], stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+                print(f"  🌐 Chrome launched headless (remote debugging on port {port}).")
+                print(f"     SSH tunnel: ssh -L {port}:localhost:{port} <this-server>")
+                print(f"     Then open: http://localhost:{port} in your local browser")
+        else:
+            import webbrowser
+            webbrowser.open(verification_url)
     except Exception:
-        pass  # headless env — user sees the URL above
+        pass  # fallback — URL is printed above
 
     # Step 2: poll for token
     deadline = time.time() + expires_in
