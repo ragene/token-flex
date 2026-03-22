@@ -24,7 +24,7 @@ export const getChunks = (params = {}) => api.get('/chunks', { params }).then(r 
 export const getSummaries = (params = {}) => api.get('/summaries', { params }).then(r => r.data)
 export const postSummarize = (body) => api.post('/summarize', body).then(r => r.data)
 export const postIngest = (body) => api.post('/ingest', body).then(r => r.data)
-export const postAutoIngest = () => api.post('/memory/ingest/auto').then(r => r.data)
+export const postAutoIngest = () => api.post('/memory/ingest/auto', {}).then(r => r.data)
 export const postMemoryQuery = (body) => api.post('/memory/query', body).then(r => r.data)
 
 // Token data REST endpoints (fallback / external callers)
