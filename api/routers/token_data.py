@@ -442,29 +442,36 @@ SQS_QUEUE_URL = os.environ.get(
 AWS_REGION = os.environ.get("AWS_REGION", "us-west-2")
 
 
-@router.post("/token-data/distill", status_code=202, dependencies=[Depends(verify_token)])
-async def trigger_distill(request: Request) -> dict:
+@router.post("/token-data/distill", status_code=202)
+async def trigger_distill(
+    request: Request,
+    token_payload: Optional[dict] = Depends(verify_token),
+) -> dict:
     """
     Publish a distill_and_clear message to the SQS queue.
     The local smart-memory service polls this queue and runs memory_distill.py full + clears token_usage.
+    The authenticated user's email is included in the SQS message so the poller
+    can attribute the distill to the right user in pipeline_events.
     """
+    triggered_by = (token_payload or {}).get("email") or "unknown"
     try:
         import boto3
-        from botocore.exceptions import ClientError
         sqs = boto3.client("sqs", region_name=AWS_REGION)
         message = {
             "action": "distill_and_clear",
             "requested_at": datetime.utcnow().isoformat(),
+            "triggered_by": triggered_by,
         }
         resp = sqs.send_message(
             QueueUrl=SQS_QUEUE_URL,
             MessageBody=_json.dumps(message),
         )
-        log.info("Distill trigger sent to SQS (MessageId=%s)", resp.get("MessageId"))
+        log.info("Distill trigger sent to SQS by %s (MessageId=%s)", triggered_by, resp.get("MessageId"))
         return {
             "status": "queued",
             "message_id": resp.get("MessageId"),
             "requested_at": message["requested_at"],
+            "triggered_by": triggered_by,
         }
     except Exception as exc:
         log.error("SQS send_message failed: %s", exc)

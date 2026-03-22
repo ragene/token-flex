@@ -474,13 +474,18 @@ def _find_claude_cli_sessions() -> list:
     return unique
 
 
-def run_distill_and_clear(args_ns):
+def run_distill_and_clear(args_ns, triggered_by: str = "unknown"):
     """
     Run a full ingest+rebuild cycle then clear session files and token_usage.
     Called by the SQS poller on each trigger message.
+
+    Args:
+        triggered_by: email of the user who initiated the distill (from SQS payload).
     """
     import subprocess, sys, shutil
     from datetime import datetime as _dt
+
+    print(f"  Triggered by: {triggered_by}")
 
     # ── 1. Distill memory ────────────────────────────────────────────────────
     cmd = [sys.executable, __file__, "full",
@@ -544,6 +549,19 @@ def run_distill_and_clear(args_ns):
     except Exception as e:
         print(f"  ⚠️  Could not clear token_usage via API: {e}")
 
+    # ── 5. Log distill event to pipeline_events ───────────────────────────────
+    try:
+        from api.push_client import log_pipeline_event
+        db_path = str(DB_PATH)
+        log_pipeline_event(db_path, "distill", {
+            "triggered_by": triggered_by,
+            "cleared_sessions": cleared,
+            "timestamp": _dt.utcnow().isoformat(),
+        })
+        print(f"  ✅ Distill event logged (triggered_by={triggered_by})")
+    except Exception as e:
+        print(f"  ⚠️  Could not log pipeline event: {e}")
+
 
 def poll_sqs(args_ns):
     """
@@ -600,17 +618,18 @@ def poll_sqs(args_ns):
 
             try:
                 body = json.loads(msg["Body"])
-                action = body.get("action", "")
-                print(f"[SQS poller] Received: action={action} at {body.get('requested_at','?')}")
+                action       = body.get("action", "")
+                triggered_by = body.get("triggered_by", "unknown")
+                print(f"[SQS poller] Received: action={action} triggered_by={triggered_by} at {body.get('requested_at','?')}")
             except Exception as e:
                 print(f"[SQS poller] Bad message body: {e} — deleting")
                 sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt)
                 continue
 
             if action == "distill_and_clear":
-                print("[SQS poller] Starting distill+clear...")
+                print(f"[SQS poller] Starting distill+clear (triggered by {triggered_by})...")
                 try:
-                    run_distill_and_clear(args_ns)
+                    run_distill_and_clear(args_ns, triggered_by=triggered_by)
                     print("[SQS poller] ✅ distill+clear complete")
                 except Exception as e:
                     print(f"[SQS poller] ⚠️  distill+clear failed: {e}")
