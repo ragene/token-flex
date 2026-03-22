@@ -76,6 +76,10 @@
           "value": "/app"
         },
         {
+          "name": "SKIP_STARTUP_AUTH",
+          "value": "true"
+        },
+        {
           "name": "PORT",
           "value": "8001"
         },
@@ -92,7 +96,7 @@
           "value": "https://token-flow.thefreightdawg.com"
         },
         {
-          "name": "SKIP_STARTUP_AUTH",
+          "name": "DISABLE_SQS_POLLER",
           "value": "true"
         }
       ],
