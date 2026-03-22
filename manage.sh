@@ -216,6 +216,13 @@ except Exception:
       echo "   ⚠️  No valid cached token found — run the token-flow service interactively first to authenticate"
     fi
 
+    # Also export TOKEN_FLOW_UI_URL so push_snapshot() in the poller sends to the
+    # correct remote ECS endpoint rather than the default hardcoded URL.
+    _TOKEN_FLOW_UI_URL="${TOKEN_FLOW_UI_URL:-}"
+    if [[ -f "${SCRIPT_DIR}/.env" ]] && [[ -z "$_TOKEN_FLOW_UI_URL" ]]; then
+      _TOKEN_FLOW_UI_URL=$(grep -E '^TOKEN_FLOW_UI_URL=' "${SCRIPT_DIR}/.env" | cut -d= -f2- | tr -d '"' || true)
+    fi
+
     nohup env \
       ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
       WORKSPACE="${_WORKSPACE}" \
@@ -223,6 +230,7 @@ except Exception:
       MEMORY_DISTILL_QUEUE_URL="${_QUEUE_URL}" \
       TOKEN_FLOW_API_URL="${_API_URL}" \
       DATABASE_URL="${_DATABASE_URL}" \
+      TOKEN_FLOW_UI_URL="${_TOKEN_FLOW_UI_URL}" \
       TOKEN_FLOW_JWT="${_TOKEN_FLOW_JWT}" \
       PYTHONUNBUFFERED=1 \
       python3 -u "${SCRIPT_DIR}/memory_distill.py" poll-sqs \

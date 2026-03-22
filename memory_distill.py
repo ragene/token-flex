@@ -659,12 +659,34 @@ def run_distill_and_clear(args_ns, triggered_by: str = "unknown", auth_token: st
         print(f"  ⚠️  Could not log pipeline event: {e}")
 
     # ── 6. Push fresh snapshot so UI reflects the clear immediately ───────────
+    # token_usage rows live in Postgres (DATABASE_URL), not the local SQLite
+    # TOKEN_FLOW_DB. Prefer DATABASE_URL so _build_snapshot() reads the right DB.
+    # Since we just cleared token_usage via the API, we also push a minimal
+    # zero-summary payload directly so the UI blanks immediately without waiting
+    # for the next 30-second push cycle.
     try:
-        from api.push_client import push_snapshot
-        # Always use TOKEN_FLOW_DB — that's where token_usage rows live.
-        # DB_PATH points to memory/context.db which has no token_usage table.
-        _tf_db = os.environ.get("TOKEN_FLOW_DB", "/home/ec2-user/.openclaw/data/token_flow.db")
-        push_snapshot(_tf_db)
+        from api.push_client import push_snapshot, _build_token_data, _build_session_data
+        _db_url = (
+            os.environ.get("DATABASE_URL", "").strip()
+            or f"sqlite:///{os.environ.get('TOKEN_FLOW_DB', '/home/ec2-user/.openclaw/data/token_flow.db')}"
+        )
+        # Build a zeroed-out summary/events payload — we just cleared token_usage
+        _zero_payload = {
+            "ts": _dt.utcnow().isoformat() + "Z",
+            "summary": {
+                "rows": [],
+                "grand_total_tokens": 0,
+                "grand_total_calls": 0,
+                "grand_cost_usd": 0.0,
+            },
+            "events": [],
+            "chunks": [],
+            "memory_entries": [],
+            "pipeline_events": [],
+            "tokens": _build_token_data(),
+            "session": _build_session_data(),
+        }
+        push_snapshot(_db_url, payload=_zero_payload)
         print(f"  ✅ Pushed fresh snapshot to UI after distill+clear")
     except Exception as e:
         print(f"  ⚠️  Could not push post-distill snapshot: {e}")
