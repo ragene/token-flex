@@ -440,27 +440,30 @@ async def token_data_ws(websocket: WebSocket, token: Optional[str] = None) -> No
     database_url: str = websocket.app.state.database_url
     await ws_manager.connect(websocket)
     try:
-        # Always send a fresh user-scoped snapshot on connect — do NOT use the shared
-        # last_snapshot cache since each user sees different session/token data.
+        # Send initial snapshot on connect (uses push_cache if available).
         initial = _build_snapshot(database_url, user_email=user_email)
         await websocket.send_text(_json.dumps(initial, default=_json_default))
 
-        # Periodic push loop: wait up to PUSH_INTERVAL for a client ping, then push
-        # a fresh snapshot regardless.  This keeps session token counts live without
-        # the client needing to poll manually.
+        # Wait for client pings or disconnect.
+        # We do NOT run a server-initiated periodic push loop here — the local service
+        # already pushes a fresh snapshot every 30s via POST /token-data/push, which
+        # broadcasts to all connected WS clients via ws_manager.broadcast().
+        # A server-side poll loop would race against that push and overwrite good
+        # push_cache data with stale ECS-local file reads.
         while True:
             try:
-                _ = await asyncio.wait_for(websocket.receive_text(), timeout=PUSH_INTERVAL)
+                msg = await asyncio.wait_for(websocket.receive_text(), timeout=60)
+                # Client sent a ping — reply with a fresh snapshot
+                snapshot = _build_snapshot(database_url, user_email=user_email)
+                await websocket.send_text(_json.dumps(snapshot, default=_json_default))
             except asyncio.TimeoutError:
-                pass  # interval elapsed — fall through to push
+                # Send a keepalive ping to prevent proxy/LB idle timeout
+                try:
+                    await websocket.send_text(_json.dumps({"ts": datetime.utcnow().isoformat() + "Z", "keepalive": True}, default=_json_default))
+                except Exception:
+                    break
             except WebSocketDisconnect:
                 break
-
-            snapshot = _build_snapshot(database_url, user_email=user_email)
-            try:
-                await websocket.send_text(_json.dumps(snapshot, default=_json_default))
-            except Exception:
-                break  # client gone
     finally:
         ws_manager.disconnect(websocket)
 
