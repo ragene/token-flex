@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routers import health, ingest, chunks, summaries, memory, token_data
+from api.routers import health, ingest, chunks, summaries, memory, token_data, auth_routes
 
 logger = logging.getLogger(__name__)
 
@@ -57,18 +57,8 @@ def create_app(database_url: str) -> FastAPI:
     # so health endpoint can display something meaningful
     app.state.db_path = database_url
 
-    # Auth config endpoint (no auth required)
-    @app.get("/auth/config")
-    def get_auth_config():
-        import os
-        return {
-            "domain": os.environ.get("AUTH0_DOMAIN", ""),
-            "clientId": os.environ.get("AUTH0_CLIENT_ID", ""),
-            "audience": os.environ.get("AUTH0_AUDIENCE", ""),
-            "configured": bool(os.environ.get("AUTH0_DOMAIN") and os.environ.get("AUTH0_CLIENT_ID")),
-        }
-
     # Register routers
+    app.include_router(auth_routes.router)  # /auth/config and /auth/exchange (no auth required)
     app.include_router(health.router)
     app.include_router(ingest.router)
     app.include_router(chunks.router)

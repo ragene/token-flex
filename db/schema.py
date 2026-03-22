@@ -101,6 +101,20 @@ _SCHEMA_SQL = """
         payload    TEXT NOT NULL,
         updated_at TIMESTAMPTZ DEFAULT NOW()
     );
+
+    -- SSO users with RBAC (roles: admin, viewer)
+    CREATE TABLE IF NOT EXISTS tf_users (
+        id          SERIAL PRIMARY KEY,
+        email       TEXT NOT NULL UNIQUE,
+        name        TEXT,
+        auth0_sub   TEXT UNIQUE,
+        role        TEXT NOT NULL DEFAULT 'viewer',
+        is_active   BOOLEAN NOT NULL DEFAULT TRUE,
+        last_login  TIMESTAMPTZ,
+        created_at  TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_tf_users_email ON tf_users(email);
+    CREATE INDEX IF NOT EXISTS idx_tf_users_sub   ON tf_users(auth0_sub);
 """
 
 
@@ -183,6 +197,19 @@ _SCHEMA_SQL_SQLITE = """
         payload    TEXT NOT NULL,
         updated_at TEXT DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS tf_users (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        email       TEXT NOT NULL UNIQUE,
+        name        TEXT,
+        auth0_sub   TEXT UNIQUE,
+        role        TEXT NOT NULL DEFAULT 'viewer',
+        is_active   INTEGER NOT NULL DEFAULT 1,
+        last_login  TEXT,
+        created_at  TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_tf_users_email ON tf_users(email);
+    CREATE INDEX IF NOT EXISTS idx_tf_users_sub   ON tf_users(auth0_sub);
 """
 
 
