@@ -373,17 +373,12 @@ class TokenSummaryResponse(BaseModel):
 class PushSnapshotIn(BaseModel):
     """
     Payload posted by the local token-flow client to push a full snapshot
-    (token data + chunks + summaries + memory entries + pipeline events) to
-    all connected UI clients.  Extra fields are forwarded as-is.
+    (token data + chunks + summaries) to all connected UI clients.
     """
     ts: Optional[str] = None
     summary: Optional[dict] = None
     chunks: Optional[list] = None
     events: Optional[list] = None
-    memory_entries: Optional[list] = None
-    pipeline_events: Optional[list] = None
-    tokens: Optional[dict] = None
-    session: Optional[dict] = None
     # Allow arbitrary extra fields for forward-compatibility
     class Config:
         extra = "allow"
@@ -454,126 +449,31 @@ async def token_data_ws(websocket: WebSocket, token: Optional[str] = None) -> No
 async def push_snapshot(body: PushSnapshotIn, request: Request) -> dict:
     """
     Receive a snapshot from the local token-flow client, persist it to
-    Postgres (memory_entries, pipeline_events, chunk_cache) AND push_cache,
-    then broadcast to all connected WS clients.
-
-    Persisting the structured rows means new WS connections (and page refreshes)
-    get real data from _build_snapshot() instead of empty tables.
+    push_cache (survives restarts), and broadcast to all connected WS clients.
     """
     payload = body.model_dump(exclude_none=False)
     if not payload.get("ts"):
         payload["ts"] = datetime.utcnow().isoformat() + "Z"
 
-    mem_upserted    = 0
-    event_inserted  = 0
-    chunk_upserted  = 0
-
+    # Persist to DB so new WS connections get real data after ECS restarts
     try:
         database_url: str = request.app.state.database_url
         conn = _conn(request)
         try:
-            # ── 1. Persist push_cache ─────────────────────────────────────────
             conn.execute(
                 """INSERT INTO push_cache (id, payload, updated_at)
                    VALUES (1, ?, NOW())
                    ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()""",
                 (_json.dumps(payload),),
             )
-
-            # ── 2. Upsert memory_entries from snapshot ────────────────────────
-            # Replace the whole set on each push (truncate then insert) so the
-            # table always mirrors the local SQLite state.
-            incoming_memory = payload.get("memory_entries") or []
-            if incoming_memory:
-                conn.execute("DELETE FROM memory_entries")
-                for entry in incoming_memory:
-                    kw = entry.get("keywords")
-                    if isinstance(kw, list):
-                        kw = _json.dumps(kw)
-                    conn.execute(
-                        """INSERT INTO memory_entries
-                           (source_file, category, content, summary, keywords, relevance, created_at)
-                           VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, NOW()))""",
-                        (
-                            entry.get("source_file"),
-                            entry.get("category"),
-                            entry.get("content") or entry.get("summary") or "",
-                            entry.get("summary"),
-                            kw,
-                            float(entry.get("relevance") or 1.0),
-                            entry.get("created_at"),
-                        ),
-                    )
-                    mem_upserted += 1
-
-            # ── 3. Append new pipeline_events ─────────────────────────────────
-            # Avoid duplicating events: only insert rows whose id doesn't exist yet.
-            # If the pushed event has no id (local SQLite uses its own sequence),
-            # always insert — dedup via a short time-window is acceptable.
-            incoming_events = payload.get("pipeline_events") or []
-            for ev in incoming_events:
-                detail = ev.get("detail") or {}
-                if isinstance(detail, dict):
-                    detail = _json.dumps(detail)
-                # Use INSERT … ON CONFLICT DO NOTHING if remote id provided
-                remote_id = ev.get("id")
-                if remote_id:
-                    conn.execute(
-                        """INSERT INTO pipeline_events (id, event_type, detail, created_at)
-                           VALUES (?, ?, ?, COALESCE(?, NOW()))
-                           ON CONFLICT (id) DO NOTHING""",
-                        (remote_id, ev.get("event_type", "ingest"), detail, ev.get("created_at")),
-                    )
-                else:
-                    conn.execute(
-                        """INSERT INTO pipeline_events (event_type, detail, created_at)
-                           VALUES (?, ?, COALESCE(?, NOW()))""",
-                        (ev.get("event_type", "ingest"), detail, ev.get("created_at")),
-                    )
-                event_inserted += 1
-
-            # ── 4. Upsert chunk_cache from snapshot ───────────────────────────
-            # Same replace strategy as memory_entries.
-            incoming_chunks = payload.get("chunks") or []
-            if incoming_chunks:
-                conn.execute("DELETE FROM chunk_cache")
-                for ch in incoming_chunks:
-                    conn.execute(
-                        """INSERT INTO chunk_cache
-                           (source_label, chunk_index, content, token_count,
-                            fact_score, preference_score, intent_score, composite_score,
-                            summary, is_summarized, created_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, NOW()))""",
-                        (
-                            ch.get("source_label"),
-                            ch.get("chunk_index") or 0,
-                            ch.get("content") or "",
-                            ch.get("token_count") or 0,
-                            ch.get("fact_score") or 0.0,
-                            ch.get("preference_score") or 0.0,
-                            ch.get("intent_score") or 0.0,
-                            ch.get("composite_score") or 0.0,
-                            ch.get("summary"),
-                            1 if ch.get("is_summarized") else 0,
-                            ch.get("created_at"),
-                        ),
-                    )
-                    chunk_upserted += 1
-
             conn.commit()
         finally:
             conn.close()
     except Exception as exc:
-        log.warning("push_snapshot DB persist failed (non-fatal): %s", exc)
+        log.debug("push_cache persist failed (non-fatal): %s", exc)
 
     await ws_manager.broadcast(payload)
-    return {
-        "ok": True,
-        "clients_notified": ws_manager.connection_count,
-        "mem_upserted": mem_upserted,
-        "events_inserted": event_inserted,
-        "chunks_upserted": chunk_upserted,
-    }
+    return {"ok": True, "clients_notified": ws_manager.connection_count}
 
 
 # ── Record endpoint ───────────────────────────────────────────────────────────
