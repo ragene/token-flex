@@ -21,6 +21,14 @@ def create_access_token(data: dict) -> str:
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
+def decode_token(token: str) -> dict:
+    """Decode and validate an internal HS256 JWT. Raises HTTPException on failure."""
+    try:
+        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError as e:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
+
+
 def verify_token(credentials: HTTPAuthorizationCredentials = Security(security)) -> Optional[dict]:
     """
     Verify internal HS256 JWT. If AUTH0_DOMAIN is not set, auth is disabled (pass-through).
@@ -33,8 +41,11 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Security(security))
     if not credentials:
         raise HTTPException(status_code=401, detail="Authorization required")
 
-    try:
-        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload
-    except JWTError as e:
-        raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
+    return decode_token(credentials.credentials)
+
+
+def get_current_user_email(token_payload: Optional[dict]) -> Optional[str]:
+    """Extract email from a decoded token payload. Returns None in dev mode (no auth)."""
+    if token_payload is None:
+        return None  # dev mode — no filtering
+    return token_payload.get("email")

@@ -24,7 +24,7 @@ from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Query, Request, WebSocket, WebSocketDisconnect
-from api.auth import verify_token
+from api.auth import verify_token, decode_token, get_current_user_email
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -71,7 +71,7 @@ def _load_push_cache(database_url: str) -> dict | None:
     return None
 
 
-def _build_tokens_and_session(database_url: str) -> tuple[dict, dict]:
+def _build_tokens_and_session(database_url: str, user_email: Optional[str] = None) -> tuple[dict, dict]:
     """
     Compute the `tokens` and `session` dicts that the Dashboard WS consumer
     expects (snap.tokens / snap.session).  Mirrors the logic in the
@@ -116,7 +116,7 @@ def _build_tokens_and_session(database_url: str) -> tuple[dict, dict]:
         status = "ok"
         msg = f"✅ Context healthy (~{total:,} tokens)."
 
-    # Chunk cache counts
+    # Chunk cache counts (not filtered by user — chunk_cache has no user_email column)
     cached_chunks = 0
     cached_chunk_tokens = 0
     try:
@@ -219,13 +219,21 @@ def _build_tokens_and_session(database_url: str) -> tuple[dict, dict]:
     return tokens, session
 
 
-def _build_snapshot(database_url: str) -> dict:
-    """Read current state from DB and return a snapshot dict."""
+def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict:
+    """
+    Read current state from DB and return a snapshot dict.
+    If user_email is provided, token_usage data is filtered to that user only.
+    """
     c = pg_connect(database_url)
     init_db(c)
+
+    # Build WHERE clause for user filtering
+    _email_filter = "WHERE user_email = ?" if user_email else ""
+    _email_params = (user_email,) if user_email else ()
+
     try:
-        # Per-operation/model summary
-        rows = c.execute("""
+        # Per-operation/model summary (filtered by user)
+        rows = c.execute(f"""
             SELECT operation, model,
                    COUNT(*) as total_calls,
                    COALESCE(SUM(prompt_tokens),0)     as prompt_tokens,
@@ -233,15 +241,16 @@ def _build_snapshot(database_url: str) -> dict:
                    COALESCE(SUM(total_tokens),0)      as total_tokens,
                    COALESCE(SUM(cost_usd),0.0)        as cost_usd
             FROM token_usage
+            {_email_filter}
             GROUP BY operation, model
             ORDER BY total_tokens DESC
-        """).fetchall()
+        """, _email_params).fetchall()
         summary_rows = [dict(r) for r in rows]
         grand_tokens = sum(r["total_tokens"] for r in summary_rows)
         grand_calls  = sum(r["total_calls"]  for r in summary_rows)
         grand_cost   = round(sum(r["cost_usd"] for r in summary_rows), 6)
 
-        # Latest 100 chunks
+        # Latest 100 chunks (no user column — shared across users)
         chunk_rows = c.execute("""
             SELECT id, source_label, chunk_index, token_count,
                    composite_score, fact_score, preference_score, intent_score,
@@ -252,18 +261,19 @@ def _build_snapshot(database_url: str) -> dict:
         """).fetchall()
         chunks = [dict(r) for r in chunk_rows]
 
-        # Latest 100 token events
-        event_rows = c.execute("""
+        # Latest 100 token events (filtered by user)
+        event_rows = c.execute(f"""
             SELECT id, user_email, operation, model,
                    prompt_tokens, completion_tokens, total_tokens,
                    cost_usd, source_label, created_at
             FROM token_usage
+            {_email_filter}
             ORDER BY created_at DESC
             LIMIT 100
-        """).fetchall()
+        """, _email_params).fetchall()
         events = [dict(r) for r in event_rows]
 
-        # Latest 50 memory entries
+        # Latest 50 memory entries (not user-scoped)
         try:
             memory_rows = c.execute("""
                 SELECT id, source_file, category, summary, keywords, relevance, created_at
@@ -275,7 +285,7 @@ def _build_snapshot(database_url: str) -> dict:
         except Exception:
             memory_entries = []
 
-        # Latest 50 pipeline events
+        # Latest 50 pipeline events (not user-scoped)
         try:
             import json as _j
             pipeline_rows = c.execute("""
@@ -298,7 +308,7 @@ def _build_snapshot(database_url: str) -> dict:
     finally:
         c.close()
 
-    tokens, session = _build_tokens_and_session(database_url)
+    tokens, session = _build_tokens_and_session(database_url, user_email=user_email)
 
     return {
         "ts": datetime.utcnow().isoformat() + "Z",
@@ -377,34 +387,44 @@ class PushSnapshotIn(BaseModel):
 # ── WebSocket endpoint ────────────────────────────────────────────────────────
 
 @router.websocket("/token-data/ws")
-async def token_data_ws(websocket: WebSocket) -> None:
+async def token_data_ws(websocket: WebSocket, token: Optional[str] = None) -> None:
     """
     WebSocket endpoint for the token-flow-ui.
 
-    - On connect: immediately sends the current DB snapshot.
-    - On new record (POST /token-data/record): broadcasts fresh snapshot to all clients.
-    - On push (POST /token-data/push): broadcasts the pushed snapshot to all clients.
-
-    Clients can also send any text message (e.g. a ping) and will receive
-    an up-to-date snapshot in reply.
+    - Authenticates via ?token=<jwt> query param (browsers can't set WS headers).
+    - When authenticated, all snapshot data is filtered to the requesting user's email.
+    - On connect: immediately sends the current user-scoped snapshot.
+    - On new record / push: client receives a refreshed user-scoped snapshot on next ping.
+    - Clients can send any text (e.g. "ping") to request an immediate refresh.
     """
+    from api.auth import AUTH0_DOMAIN
+
+    # Authenticate — require token when AUTH0_DOMAIN is configured
+    user_email: Optional[str] = None
+    if AUTH0_DOMAIN:
+        if not token:
+            await websocket.close(code=4401, reason="Authorization required")
+            return
+        try:
+            payload = decode_token(token)
+            user_email = payload.get("email")
+        except Exception:
+            await websocket.close(code=4401, reason="Invalid token")
+            return
+
     database_url: str = websocket.app.state.database_url
     await ws_manager.connect(websocket)
     try:
-        # On connect: use in-memory cache → push_cache DB → empty DB snapshot (priority order)
-        if ws_manager.last_snapshot is not None:
-            initial = ws_manager.last_snapshot
-        else:
-            initial = _load_push_cache(database_url) or _build_snapshot(database_url)
-            if initial:
-                ws_manager.last_snapshot = initial  # warm the in-memory cache
+        # Always build a fresh user-scoped snapshot on connect (don't use shared cache
+        # since each user sees different data)
+        initial = _build_snapshot(database_url, user_email=user_email)
         await ws_manager.send_initial(websocket, initial)
 
-        # Keep the connection alive; respond to any client message with the latest snapshot
+        # Keep alive; respond to pings with a fresh user-scoped snapshot
         while True:
             try:
                 _ = await websocket.receive_text()
-                snapshot = ws_manager.last_snapshot or _build_snapshot(database_url)
+                snapshot = _build_snapshot(database_url, user_email=user_email)
                 await websocket.send_text(_json.dumps(snapshot, default=_json_default))
             except WebSocketDisconnect:
                 break
@@ -480,12 +500,15 @@ async def record_usage(body: TokenUsageIn, request: Request) -> TokenUsageOut:
 
 # ── Summary endpoint ──────────────────────────────────────────────────────────
 
-@router.get("/token-data/summary", response_model=TokenSummaryResponse, dependencies=[Depends(verify_token)])
-async def token_summary(request: Request) -> TokenSummaryResponse:
-    """Aggregated totals grouped by operation + model."""
+@router.get("/token-data/summary", response_model=TokenSummaryResponse)
+async def token_summary(request: Request, token_payload: Optional[dict] = Depends(verify_token)) -> TokenSummaryResponse:
+    """Aggregated totals grouped by operation + model, scoped to the requesting user."""
+    user_email = get_current_user_email(token_payload)
+    email_filter = "WHERE user_email = ?" if user_email else ""
+    email_params = (user_email,) if user_email else ()
     conn = _conn(request)
     try:
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT
                 operation,
                 model,
@@ -495,9 +518,10 @@ async def token_summary(request: Request) -> TokenSummaryResponse:
                 COALESCE(SUM(total_tokens), 0) as total_tokens,
                 COALESCE(SUM(cost_usd), 0.0) as cost_usd
             FROM token_usage
+            {email_filter}
             GROUP BY operation, model
             ORDER BY total_tokens DESC
-        """).fetchall()
+        """, email_params).fetchall()
         summary_rows = [
             TokenSummaryRow(
                 operation=r["operation"],
@@ -525,18 +549,22 @@ async def token_summary(request: Request) -> TokenSummaryResponse:
 
 # ── Events endpoint ───────────────────────────────────────────────────────────
 
-@router.get("/token-data/events", response_model=List[TokenUsageOut], dependencies=[Depends(verify_token)])
+@router.get("/token-data/events", response_model=List[TokenUsageOut])
 async def list_events(
     request: Request,
+    token_payload: Optional[dict] = Depends(verify_token),
     operation: Optional[str] = Query(None),
     model:     Optional[str] = Query(None),
     limit:     int           = Query(200, ge=1, le=1000),
     offset:    int           = Query(0,   ge=0),
 ) -> List[TokenUsageOut]:
-    """Raw event rows, newest first."""
+    """Raw event rows, newest first, scoped to the requesting user."""
+    user_email = get_current_user_email(token_payload)
     conn = _conn(request)
     try:
         conditions, params = [], []
+        if user_email:
+            conditions.append("user_email = ?"); params.append(user_email)
         if operation:
             conditions.append("operation = ?"); params.append(operation)
         if model:
@@ -554,13 +582,17 @@ async def list_events(
 
 # ── Export endpoint ───────────────────────────────────────────────────────────
 
-@router.get("/token-data/export", dependencies=[Depends(verify_token)])
-async def export_csv(request: Request) -> StreamingResponse:
-    """Download all token_usage rows as CSV."""
+@router.get("/token-data/export")
+async def export_csv(request: Request, token_payload: Optional[dict] = Depends(verify_token)) -> StreamingResponse:
+    """Download token_usage rows as CSV, scoped to the requesting user."""
+    user_email = get_current_user_email(token_payload)
+    email_filter = "WHERE user_email = ?" if user_email else ""
+    email_params = (user_email,) if user_email else ()
     conn = _conn(request)
     try:
         rows = conn.execute(
-            "SELECT * FROM token_usage ORDER BY created_at DESC"
+            f"SELECT * FROM token_usage {email_filter} ORDER BY created_at DESC",
+            email_params,
         ).fetchall()
     finally:
         conn.close()
