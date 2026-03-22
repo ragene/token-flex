@@ -109,8 +109,6 @@ def summarize_top_chunks(
 
     logger.info("Summarizing top %d / %d unsummarized chunks (%.0f%%)", take, total, top_pct * 100)
 
-    client = anthropic.Anthropic()
-
     def _summarize_one(row):
         row_id, content, _score = row
         prompt = _SUMMARIZE_PROMPT.format(
@@ -118,6 +116,8 @@ def summarize_top_chunks(
             content=content[:4000],
         )
         try:
+            # Create a new client per thread — Anthropic client is not thread-safe
+            client = anthropic.Anthropic()
             msg = client.messages.create(
                 model=_HAIKU_MODEL,
                 max_tokens=256,
