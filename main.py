@@ -44,5 +44,58 @@ if __name__ == "__main__":
     print(f"   Memory dir: {MEMORY_DIR}")
     print(f"   DB        : {db_label}")
 
+    # ── SSO Auth + local session registration ────────────────────────────────
+    # Authenticate the user via Auth0 Device Flow before the service starts.
+    # If a valid cached token exists, completes silently. Otherwise prints
+    # a verification URL for the user to visit in their browser.
+    # On success, registers the user identity with the API (local_sessions table)
+    # so the dashboard can show who is running the local service.
+    try:
+        import socket as _socket
+        import json as _json2
+        import urllib.request as _urllib_req
+        from api.device_auth import get_token, get_cached_user
+
+        print("🔐 Authenticating with Auth0 SSO...")
+        get_token()
+        user_info = get_cached_user()
+        user_email = user_info.get("email", "unknown")
+        print(f"✅ Authenticated as {user_email}")
+
+        # Register identity with the local API once it's up — do it after startup
+        # by storing user info for the post-startup hook below
+        _sso_user = user_info
+    except Exception as _e:
+        print(f"⚠️  SSO auth failed (continuing): {_e}")
+        _sso_user = {}
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # Register identity with the local API a few seconds after startup
+    def _register_local_session():
+        import time, socket
+        time.sleep(3)  # wait for uvicorn to be ready
+        try:
+            payload = _json2.dumps({
+                "email":     _sso_user.get("email"),
+                "name":      _sso_user.get("name"),
+                "picture":   _sso_user.get("picture"),
+                "auth0_sub": _sso_user.get("sub"),
+                "host":      socket.gethostname(),
+            }).encode()
+            req = _urllib_req.Request(
+                f"http://localhost:{PORT}/session/identify",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with _urllib_req.urlopen(req, timeout=5) as r:
+                print(f"✅ Local session registered: {r.read().decode()}")
+        except Exception as e:
+            print(f"⚠️  Could not register local session: {e}")
+
+    if _sso_user.get("email"):
+        import threading
+        threading.Thread(target=_register_local_session, daemon=True).start()
+
     app = create_app(database_url=DATABASE_URL)
     uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")
