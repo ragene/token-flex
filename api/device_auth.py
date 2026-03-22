@@ -94,10 +94,18 @@ def _device_flow() -> str:
     print("\n" + "="*60)
     print("🔐  Token Flow — Login Required")
     print("="*60)
-    print(f"\n  Open this URL in your browser:\n\n  {verification_url}\n")
-    print(f"  Or go to: {resp.get('verification_uri', '')} and enter code: {user_code}")
+    print(f"\n  Opening browser for authentication...")
+    print(f"  URL: {verification_url}")
+    print(f"  Code: {user_code}")
     print("\n  Waiting for you to authenticate...")
     print("="*60 + "\n")
+
+    # Auto-open browser
+    try:
+        import webbrowser
+        webbrowser.open(verification_url)
+    except Exception:
+        pass  # headless env — user sees the URL above
 
     # Step 2: poll for token
     deadline = time.time() + expires_in
