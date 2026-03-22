@@ -543,7 +543,9 @@ def run_distill_and_clear(args_ns, triggered_by: str = "unknown", auth_token: st
     #   b) If no JWT and SKIP_STARTUP_AUTH=true, skip device-flow entirely and
     #      clear the DB directly via SQLAlchemy/psycopg2 using DATABASE_URL.
     #      This avoids hanging on a browser prompt inside ECS.
-    api_url = os.environ.get("TOKEN_FLOW_API_URL", "http://localhost:8001")
+    # Prefer the remote ECS UI URL — that's where token_usage rows live in Postgres.
+    _remote_url = os.environ.get("TOKEN_FLOW_UI_URL", "").rstrip("/")
+    api_url = _remote_url or os.environ.get("TOKEN_FLOW_API_URL", "http://localhost:8001")
     _cleared_via_api = False
 
     if auth_token:
@@ -627,6 +629,14 @@ def run_distill_and_clear(args_ns, triggered_by: str = "unknown", auth_token: st
     except Exception as e:
         print(f"  ⚠️  Could not log pipeline event: {e}")
 
+    # ── 6. Push fresh snapshot so UI reflects the clear immediately ───────────
+    try:
+        from api.push_client import push_snapshot
+        push_snapshot(str(DB_PATH))
+        print(f"  ✅ Pushed fresh snapshot to UI after distill+clear")
+    except Exception as e:
+        print(f"  ⚠️  Could not push post-distill snapshot: {e}")
+
 
 def poll_sqs(args_ns):
     """
@@ -698,17 +708,18 @@ def poll_sqs(args_ns):
     print(f"[SQS poller] Listening on {queue_url} (region={region})")
 
     # Resolve the startup token once — reuse it for all distill calls.
-    # If SKIP_STARTUP_AUTH is true, startup_token stays None and the direct
-    # DB-clear path will be used instead.
+    # Always try to load a cached token even when SKIP_STARTUP_AUTH=true,
+    # so the API-based clear path (which hits the remote ECS DB) is used.
     startup_token: Optional[str] = None
-    if not _skip_auth:
-        try:
-            from api.device_auth import _load_cache
-            startup_token = _load_cache()
-            if startup_token:
-                print(f"[SQS poller] ✅ Using cached startup token for distill calls")
-        except Exception:
-            pass
+    try:
+        from api.device_auth import _load_cache
+        startup_token = _load_cache()
+        if startup_token:
+            print(f"[SQS poller] ✅ Using cached token for distill calls")
+    except Exception:
+        pass
+    if not startup_token and not _skip_auth:
+        print(f"[SQS poller] ⚠️  No cached token — distill clear will use direct DB path")
 
     while True:
         try:
