@@ -33,7 +33,7 @@ from db.pg_compat import connect as pg_connect
 from api.db_helper import get_db_url
 from api.ws_manager import ws_manager
 
-router = APIRouter(tags=["token-data"], dependencies=[Depends(verify_token)])
+router = APIRouter(tags=["token-data"])
 
 
 def _json_default(obj):
@@ -262,7 +262,7 @@ async def token_data_ws(websocket: WebSocket) -> None:
 
 # ── Push endpoint (called by local token-flow client) ─────────────────────────
 
-@router.post("/token-data/push", status_code=200)
+@router.post("/token-data/push", status_code=200, dependencies=[Depends(verify_token)])
 async def push_snapshot(body: PushSnapshotIn, request: Request) -> dict:
     """
     Receive a snapshot from the local token-flow client, persist it to
@@ -295,7 +295,7 @@ async def push_snapshot(body: PushSnapshotIn, request: Request) -> dict:
 
 # ── Record endpoint ───────────────────────────────────────────────────────────
 
-@router.post("/token-data/record", response_model=TokenUsageOut, status_code=201)
+@router.post("/token-data/record", response_model=TokenUsageOut, status_code=201, dependencies=[Depends(verify_token)])
 async def record_usage(body: TokenUsageIn, request: Request) -> TokenUsageOut:
     """Write a single AI call token-usage row and broadcast a fresh snapshot to WS clients."""
     total = body.total_tokens if body.total_tokens is not None else (body.prompt_tokens + body.completion_tokens)
@@ -328,7 +328,7 @@ async def record_usage(body: TokenUsageIn, request: Request) -> TokenUsageOut:
 
 # ── Summary endpoint ──────────────────────────────────────────────────────────
 
-@router.get("/token-data/summary", response_model=TokenSummaryResponse)
+@router.get("/token-data/summary", response_model=TokenSummaryResponse, dependencies=[Depends(verify_token)])
 async def token_summary(request: Request) -> TokenSummaryResponse:
     """Aggregated totals grouped by operation + model."""
     conn = _conn(request)
@@ -373,7 +373,7 @@ async def token_summary(request: Request) -> TokenSummaryResponse:
 
 # ── Events endpoint ───────────────────────────────────────────────────────────
 
-@router.get("/token-data/events", response_model=List[TokenUsageOut])
+@router.get("/token-data/events", response_model=List[TokenUsageOut], dependencies=[Depends(verify_token)])
 async def list_events(
     request: Request,
     operation: Optional[str] = Query(None),
@@ -402,7 +402,7 @@ async def list_events(
 
 # ── Export endpoint ───────────────────────────────────────────────────────────
 
-@router.get("/token-data/export")
+@router.get("/token-data/export", dependencies=[Depends(verify_token)])
 async def export_csv(request: Request) -> StreamingResponse:
     """Download all token_usage rows as CSV."""
     conn = _conn(request)
@@ -442,7 +442,7 @@ SQS_QUEUE_URL = os.environ.get(
 AWS_REGION = os.environ.get("AWS_REGION", "us-west-2")
 
 
-@router.post("/token-data/distill", status_code=202)
+@router.post("/token-data/distill", status_code=202, dependencies=[Depends(verify_token)])
 async def trigger_distill(request: Request) -> dict:
     """
     Publish a distill_and_clear message to the SQS queue.
@@ -472,7 +472,7 @@ async def trigger_distill(request: Request) -> dict:
         raise HTTPException(status_code=502, detail=f"SQS error: {exc}")
 
 
-@router.delete("/token-data/clear", status_code=200)
+@router.delete("/token-data/clear", status_code=200, dependencies=[Depends(verify_token)])
 async def clear_token_usage(request: Request) -> dict:
     """
     Delete all token_usage rows. Called by the local service after distillation completes,
