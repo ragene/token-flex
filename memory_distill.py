@@ -580,42 +580,47 @@ def poll_sqs(args_ns):
     # ── SSO Auth + local session registration ────────────────────────────────
     # Run Auth0 device flow at startup; register user identity with the API
     # so the dashboard can show who is running the local service.
-    print("[SQS poller] Authenticating with Auth0 SSO...")
+    _skip_auth = os.environ.get("SKIP_STARTUP_AUTH", "").lower() in ("1", "true", "yes")
     user_email = "unknown"
-    try:
-        import urllib.request as _urllib_req
-        from api.device_auth import get_token, _load_cache
-        import json as _json2, time as _time
 
-        # Get token (device flow if no cache) — userinfo is cached alongside it
-        get_token()
-        from api.device_auth import get_cached_user
-        user_info = get_cached_user()
+    if _skip_auth:
+        print("[SQS poller] 🔐 Skipping SSO auth (SKIP_STARTUP_AUTH=true)")
+    else:
+        print("[SQS poller] Authenticating with Auth0 SSO...")
+        try:
+            import urllib.request as _urllib_req
+            from api.device_auth import get_token, _load_cache
+            import json as _json2, time as _time
 
-        user_email = user_info.get("email", "unknown")
-        print(f"[SQS poller] ✅ Authenticated as {user_email}")
+            # Get token (device flow if no cache) — userinfo is cached alongside it
+            get_token()
+            from api.device_auth import get_cached_user
+            user_info = get_cached_user()
 
-        # Register with the API
-        api_url = os.environ.get("TOKEN_FLOW_API_URL", "http://localhost:8001")
-        import socket as _socket
-        payload = _json2.dumps({
-            "email":    user_email,
-            "name":     user_info.get("name"),
-            "picture":  user_info.get("picture"),
-            "auth0_sub": user_info.get("sub"),
-            "host":     _socket.gethostname(),
-        }).encode()
-        id_req = _urllib_req.Request(
-            f"{api_url}/session/identify",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with _urllib_req.urlopen(id_req, timeout=5) as r:
-            print(f"[SQS poller] ✅ Registered local session: {r.read().decode()}")
+            user_email = user_info.get("email", "unknown")
+            print(f"[SQS poller] ✅ Authenticated as {user_email}")
 
-    except Exception as e:
-        print(f"[SQS poller] ⚠️  Auth/identify failed (continuing): {e}")
+            # Register with the API
+            api_url = os.environ.get("TOKEN_FLOW_API_URL", "http://localhost:8001")
+            import socket as _socket
+            payload = _json2.dumps({
+                "email":    user_email,
+                "name":     user_info.get("name"),
+                "picture":  user_info.get("picture"),
+                "auth0_sub": user_info.get("sub"),
+                "host":     _socket.gethostname(),
+            }).encode()
+            id_req = _urllib_req.Request(
+                f"{api_url}/session/identify",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with _urllib_req.urlopen(id_req, timeout=5) as r:
+                print(f"[SQS poller] ✅ Registered local session: {r.read().decode()}")
+
+        except Exception as e:
+            print(f"[SQS poller] ⚠️  Auth/identify failed (continuing): {e}")
     # ─────────────────────────────────────────────────────────────────────────
 
     queue_url = os.environ.get(

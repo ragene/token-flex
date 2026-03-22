@@ -57,22 +57,27 @@ if __name__ == "__main__":
     _auth0_token: list = [""]   # mutable container so inner function can update it
     _sso_user: list = [{}]      # _sso_user[0] holds the dict
 
-    try:
-        from api.device_auth import _load_cache, get_cached_user, _device_flow
+    _skip_auth = os.environ.get("SKIP_STARTUP_AUTH", "").lower() in ("1", "true", "yes")
 
-        cached = _load_cache()
-        if cached:
-            # Token already cached — grab user info directly, no network needed
-            print("🔐 SSO: using cached token")
-            _sso_user[0] = get_cached_user()
-            print(f"✅ Authenticated as {_sso_user[0].get('email', 'unknown')}")
-        else:
-            # Run Auth0 Device Flow (prints URL, waits for browser login)
-            print("🔐 Authenticating with Auth0 SSO...")
-            _auth0_token[0] = _device_flow()
-            print("✅ Auth0 login complete — will exchange token after server starts")
-    except Exception as _e:
-        print(f"⚠️  SSO auth failed (continuing): {_e}")
+    if _skip_auth:
+        print("🔐 SSO: skipping startup auth (SKIP_STARTUP_AUTH=true)")
+    else:
+        try:
+            from api.device_auth import _load_cache, get_cached_user, _device_flow
+
+            cached = _load_cache()
+            if cached:
+                # Token already cached — grab user info directly, no network needed
+                print("🔐 SSO: using cached token")
+                _sso_user[0] = get_cached_user()
+                print(f"✅ Authenticated as {_sso_user[0].get('email', 'unknown')}")
+            else:
+                # Run Auth0 Device Flow (prints URL, waits for browser login)
+                print("🔐 Authenticating with Auth0 SSO...")
+                _auth0_token[0] = _device_flow()
+                print("✅ Auth0 login complete — will exchange token after server starts")
+        except Exception as _e:
+            print(f"⚠️  SSO auth failed (continuing): {_e}")
     # ─────────────────────────────────────────────────────────────────────────
 
     # Phase 2: run after uvicorn is ready
