@@ -577,21 +577,6 @@ def poll_sqs(args_ns):
     """
     import boto3
 
-    # ── SSO Auth Gate ─────────────────────────────────────────────────────────
-    # When launched via start.sh the user already authenticated; this is a
-    # safety net for direct invocations. If no cached token exists we run the
-    # full device flow (URL printed to stdout). On failure we exit immediately.
-    print("[SQS poller] Checking authentication...")
-    try:
-        from api.device_auth import get_token
-        get_token()
-        print("[SQS poller] ✅ Authenticated — starting poller")
-    except Exception as e:
-        print(f"[SQS poller] ❌ Authentication failed: {e}")
-        print("[SQS poller] Cannot start without valid SSO credentials. Exiting.")
-        import sys
-        sys.exit(1)
-
     queue_url = os.environ.get(
         "MEMORY_DISTILL_QUEUE_URL",
         "https://sqs.us-west-2.amazonaws.com/531948420901/freightdawg-memory-distill",
