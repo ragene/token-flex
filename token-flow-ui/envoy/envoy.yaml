@@ -14,8 +14,8 @@ static_resources:
                 # WebSocket upgrade passthrough
                 upgrade_configs:
                   - upgrade_type: websocket
-                stream_idle_timeout: 300s
-                request_timeout: 60s
+                stream_idle_timeout: 600s
+                request_timeout: 600s
                 request_headers_timeout: 10s
                 common_http_protocol_options:
                   idle_timeout: 300s
@@ -64,9 +64,9 @@ static_resources:
                         - match: { prefix: "/summaries" }
                           route: { cluster: token_flow_api, timeout: 30s }
                         - match: { prefix: "/summarize" }
-                          route: { cluster: token_flow_api, timeout: 60s }
+                          route: { cluster: token_flow_api, timeout: 600s }
                         - match: { prefix: "/memory" }
-                          route: { cluster: token_flow_api, timeout: 30s }
+                          route: { cluster: token_flow_api, timeout: 600s }
                         - match: { prefix: "/tokens" }
                           route: { cluster: token_flow_api, timeout: 30s }
                         - match: { prefix: "/session" }
