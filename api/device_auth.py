@@ -71,6 +71,11 @@ def _post_json(url: str, data: dict, headers: Optional[dict] = None, timeout: in
         return json.loads(r.read().decode())
 
 
+def device_flow() -> str:
+    """Public alias for _device_flow — run Auth0 Device Flow without the internal exchange."""
+    return _device_flow()
+
+
 def _device_flow() -> str:
     """
     Run Auth0 Device Authorization Flow.

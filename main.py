@@ -45,41 +45,88 @@ if __name__ == "__main__":
     print(f"   DB        : {db_label}")
 
     # ── SSO Auth + local session registration ────────────────────────────────
-    # Authenticate the user via Auth0 Device Flow before the service starts.
-    # If a valid cached token exists, completes silently. Otherwise prints
-    # a verification URL for the user to visit in their browser.
-    # On success, registers the user identity with the API (local_sessions table)
-    # so the dashboard can show who is running the local service.
+    # Phase 1 (pre-startup): Run the Auth0 Device Flow to get an Auth0 access
+    # token. We deliberately stop BEFORE calling _exchange(), because that hits
+    # localhost:{PORT}/auth/exchange — a server that doesn't exist yet.
+    # Phase 2 (post-startup): A background thread waits for uvicorn to be ready,
+    # then exchanges the Auth0 token for an internal JWT, caches it, and
+    # registers the user identity with /session/identify.
+    import json as _json2
+    import urllib.request as _urllib_req
+
+    _auth0_token: list = [""]   # mutable container so inner function can update it
+    _sso_user: list = [{}]      # _sso_user[0] holds the dict
+
     try:
-        import socket as _socket
-        import json as _json2
-        import urllib.request as _urllib_req
-        from api.device_auth import get_token, get_cached_user
+        from api.device_auth import _load_cache, get_cached_user, _device_flow
 
-        print("🔐 Authenticating with Auth0 SSO...")
-        get_token()
-        user_info = get_cached_user()
-        user_email = user_info.get("email", "unknown")
-        print(f"✅ Authenticated as {user_email}")
-
-        # Register identity with the local API once it's up — do it after startup
-        # by storing user info for the post-startup hook below
-        _sso_user = user_info
+        cached = _load_cache()
+        if cached:
+            # Token already cached — grab user info directly, no network needed
+            print("🔐 SSO: using cached token")
+            _sso_user[0] = get_cached_user()
+            print(f"✅ Authenticated as {_sso_user[0].get('email', 'unknown')}")
+        else:
+            # Run Auth0 Device Flow (prints URL, waits for browser login)
+            print("🔐 Authenticating with Auth0 SSO...")
+            _auth0_token[0] = _device_flow()
+            print("✅ Auth0 login complete — will exchange token after server starts")
     except Exception as _e:
         print(f"⚠️  SSO auth failed (continuing): {_e}")
-        _sso_user = {}
     # ─────────────────────────────────────────────────────────────────────────
 
-    # Register identity with the local API a few seconds after startup
+    # Phase 2: run after uvicorn is ready
     def _register_local_session():
-        import time, socket
-        time.sleep(3)  # wait for uvicorn to be ready
+        import time, socket, urllib.error
+        from api.device_auth import _exchange, _save_cache, get_cached_user
+
+        # Wait for uvicorn to be ready
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            try:
+                with _urllib_req.urlopen(f"http://localhost:{PORT}/health", timeout=2):
+                    break
+            except Exception:
+                time.sleep(1)
+        else:
+            print("⚠️  Server did not become ready in time — skipping session registration")
+            return
+
+        # Exchange Auth0 token for internal JWT (only if we did a fresh device flow)
+        if _auth0_token[0] and not _sso_user[0]:
+            try:
+                internal_token, expires_in = _exchange(_auth0_token[0])
+
+                # Fetch user info from Auth0
+                user: dict = {}
+                try:
+                    from api.device_auth import AUTH0_DOMAIN
+                    req = _urllib_req.Request(
+                        f"https://{AUTH0_DOMAIN}/userinfo",
+                        headers={"Authorization": f"Bearer {_auth0_token[0]}"},
+                    )
+                    with _urllib_req.urlopen(req, timeout=10) as r:
+                        user = _json2.loads(r.read().decode())
+                except Exception:
+                    pass
+
+                _save_cache(internal_token, expires_in, user=user)
+                _sso_user[0] = user
+                print(f"✅ Authenticated as {_sso_user[0].get('email', 'unknown')}")
+            except Exception as e:
+                print(f"⚠️  Token exchange failed: {e}")
+                return
+
+        if not _sso_user[0].get("email"):
+            return
+
+        # Register identity with the API
         try:
             payload = _json2.dumps({
-                "email":     _sso_user.get("email"),
-                "name":      _sso_user.get("name"),
-                "picture":   _sso_user.get("picture"),
-                "auth0_sub": _sso_user.get("sub"),
+                "email":     _sso_user[0].get("email"),
+                "name":      _sso_user[0].get("name"),
+                "picture":   _sso_user[0].get("picture"),
+                "auth0_sub": _sso_user[0].get("sub"),
                 "host":      socket.gethostname(),
             }).encode()
             req = _urllib_req.Request(
@@ -93,9 +140,8 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"⚠️  Could not register local session: {e}")
 
-    if _sso_user.get("email"):
-        import threading
-        threading.Thread(target=_register_local_session, daemon=True).start()
+    import threading
+    threading.Thread(target=_register_local_session, daemon=True).start()
 
     app = create_app(database_url=DATABASE_URL)
     uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")
