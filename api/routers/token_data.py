@@ -319,6 +319,18 @@ def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict
     if pushed:
         tokens          = pushed.get("tokens")  or {}
         session         = pushed.get("session") or {}
+        # token_usage lives in local SQLite (not Postgres), so the DB queries above
+        # return empty rows.  When the DB has no data, pull summary/events from the
+        # push_cache snapshot sent by the local service so connecting/reconnecting
+        # clients see the same data as clients that received the live broadcast.
+        if not summary_rows and pushed.get("summary"):
+            pushed_summary = pushed["summary"]
+            summary_rows   = pushed_summary.get("rows", summary_rows)
+            grand_tokens   = pushed_summary.get("grand_total_tokens", grand_tokens)
+            grand_calls    = pushed_summary.get("grand_total_calls",  grand_calls)
+            grand_cost     = pushed_summary.get("grand_cost_usd",     grand_cost)
+        if not events and pushed.get("events"):
+            events = pushed["events"]
         # Only fall back to DB memory/pipeline rows if push didn't include them
         if not memory_entries:
             memory_entries  = pushed.get("memory_entries")  or memory_entries
