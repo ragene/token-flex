@@ -65,6 +65,20 @@ Return ONLY valid JSON, no markdown."""
         # Strip markdown code blocks if present
         raw = re.sub(r'^```json?\s*', '', raw)
         raw = re.sub(r'\s*```$', '', raw)
+        # Extract only the first JSON object — Claude sometimes appends extra text/blocks
+        # which causes json.loads to raise "Extra data: line N column 1 (char X)"
+        brace_depth = 0
+        end_idx = None
+        for i, ch in enumerate(raw):
+            if ch == '{':
+                brace_depth += 1
+            elif ch == '}':
+                brace_depth -= 1
+                if brace_depth == 0:
+                    end_idx = i + 1
+                    break
+        if end_idx is not None:
+            raw = raw[:end_idx]
         return json.loads(raw)
     except Exception as e:
         print(f"Claude summarization failed: {e}")
@@ -337,6 +351,19 @@ Return ONLY valid JSON, no markdown."""
         raw = msg.content[0].text.strip()
         raw = re.sub(r'^```json?\s*', '', raw)
         raw = re.sub(r'\s*```$', '', raw)
+        # Extract only the first JSON object to avoid "Extra data" errors
+        brace_depth = 0
+        end_idx = None
+        for i, ch in enumerate(raw):
+            if ch == '{':
+                brace_depth += 1
+            elif ch == '}':
+                brace_depth -= 1
+                if brace_depth == 0:
+                    end_idx = i + 1
+                    break
+        if end_idx is not None:
+            raw = raw[:end_idx]
         result_json = json.loads(raw)
     except Exception as e:
         print(f"  Claude summarization failed: {e}")
