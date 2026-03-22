@@ -289,13 +289,17 @@ def _get_push_token() -> Optional[str]:
     Resolve a bearer token for the /token-data/push call.
 
     Priority order:
-      1. Cached Auth0 device-flow token (if available and not expired).
-      2. Internal HS256 JWT minted directly from SECRET_KEY — used when
-         SKIP_STARTUP_AUTH=true (e.g. ECS / headless environments) so we
-         never hang waiting for a browser prompt.
-      3. None (push goes unauthenticated — will 401 if AUTH0_DOMAIN is set).
+      1. TOKEN_FLOW_JWT env var — pre-minted by manage.sh start-poller so
+         the poller never needs interactive device-flow.
+      2. Cached Auth0 device-flow token (interactive sessions / local dev).
+      3. None — push goes unauthenticated; will 401 if AUTH0_DOMAIN is set.
     """
-    # 1. Try cached device-flow token first
+    # 1. Pre-minted JWT passed in by manage.sh (headless / ECS path)
+    jwt_env = os.environ.get("TOKEN_FLOW_JWT", "").strip()
+    if jwt_env:
+        return jwt_env
+
+    # 2. Cached device-flow token (interactive local dev)
     try:
         from api.device_auth import _load_cache
         cached = _load_cache()
@@ -303,22 +307,6 @@ def _get_push_token() -> Optional[str]:
             return cached
     except Exception:
         pass
-
-    # 2. Mint an internal HS256 service token using SECRET_KEY
-    secret = os.environ.get("SECRET_KEY", "")
-    if secret:
-        try:
-            from datetime import datetime as _dt, timedelta as _td
-            from jose import jwt as _jwt
-            payload = {
-                "sub":   "sqs-poller",
-                "email": "sqs-poller@token-flow.internal",
-                "role":  "admin",
-                "exp":   _dt.utcnow() + _td(hours=1),
-            }
-            return _jwt.encode(payload, secret, algorithm="HS256")
-        except Exception as exc:
-            log.debug("_get_push_token: HS256 mint failed: %s", exc)
 
     return None
 

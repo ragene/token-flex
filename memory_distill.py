@@ -680,13 +680,15 @@ def poll_sqs(args_ns):
     import boto3
 
     # ── SSO Auth + local session registration ────────────────────────────────
-    # Run Auth0 device flow at startup; register user identity with the API
-    # so the dashboard can show who is running the local service.
-    _skip_auth = os.environ.get("SKIP_STARTUP_AUTH", "").lower() in ("1", "true", "yes")
-    user_email = "unknown"
+    # When TOKEN_FLOW_JWT is set (injected by manage.sh), skip the interactive
+    # Auth0 device-flow — the pre-minted JWT handles all authenticated calls.
+    # In interactive local dev mode (no TOKEN_FLOW_JWT), run the device-flow so
+    # the dashboard can show who is running the local service.
+    _skip_auth = bool(os.environ.get("TOKEN_FLOW_JWT", "").strip())
+    user_email = "sqs-poller@token-flow.internal" if _skip_auth else "unknown"
 
     if _skip_auth:
-        print("[SQS poller] 🔐 Skipping SSO auth (SKIP_STARTUP_AUTH=true)")
+        print("[SQS poller] 🔐 Skipping SSO device-flow (TOKEN_FLOW_JWT provided)")
     else:
         print("[SQS poller] Authenticating with Auth0 SSO...")
         try:
@@ -735,41 +737,24 @@ def poll_sqs(args_ns):
     print(f"[SQS poller] Listening on {queue_url} (region={region})")
 
     # Resolve the startup token once — reuse it for all distill calls.
-    # Priority:
-    #   1. Cached device-flow token (if user authenticated interactively).
-    #   2. Internal HS256 service token minted from SECRET_KEY — works in
-    #      headless/ECS mode without any browser prompt.
-    startup_token: Optional[str] = None
-    try:
-        from api.device_auth import _load_cache
-        startup_token = _load_cache()
-        if startup_token:
-            print(f"[SQS poller] ✅ Using cached device-flow token for distill calls")
-    except Exception:
-        pass
+    # TOKEN_FLOW_JWT is minted by manage.sh start-poller from SECRET_KEY so
+    # the poller never needs an interactive device-flow / browser prompt.
+    startup_token: Optional[str] = os.environ.get("TOKEN_FLOW_JWT", "").strip() or None
+
+    if startup_token:
+        print(f"[SQS poller] ✅ Using TOKEN_FLOW_JWT for authenticated push/clear calls")
+    else:
+        # Fallback: cached device-flow token (interactive local dev)
+        try:
+            from api.device_auth import _load_cache
+            startup_token = _load_cache()
+            if startup_token:
+                print(f"[SQS poller] ✅ Using cached device-flow token for distill calls")
+        except Exception:
+            pass
 
     if not startup_token:
-        _secret = os.environ.get("SECRET_KEY", "")
-        if _secret:
-            try:
-                from datetime import datetime as _dt2, timedelta as _td2
-                from jose import jwt as _jwt2
-                startup_token = _jwt2.encode(
-                    {
-                        "sub":   "sqs-poller",
-                        "email": "sqs-poller@token-flow.internal",
-                        "role":  "admin",
-                        "exp":   _dt2.utcnow() + _td2(hours=4),
-                    },
-                    _secret,
-                    algorithm="HS256",
-                )
-                print(f"[SQS poller] ✅ Minted internal HS256 service token for distill calls")
-            except Exception as _e:
-                print(f"[SQS poller] ⚠️  Could not mint HS256 token: {_e}")
-
-    if not startup_token:
-        print(f"[SQS poller] ⚠️  No token available — distill clear will use direct DB path")
+        print(f"[SQS poller] ⚠️  No token available — distill clear will fall back to direct DB path")
 
     while True:
         try:

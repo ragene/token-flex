@@ -197,6 +197,25 @@ for p in ['~/.openclaw/agents/main/agent/auth-profiles.json']:
     _TOKEN_FLOW_DB="${TOKEN_FLOW_DB:-/home/ec2-user/.openclaw/data/token_flow.db}"
     _DATABASE_URL="${DATABASE_URL:-sqlite:///${_TOKEN_FLOW_DB}}"
 
+    # Read the cached token written by the Auth0 device-flow — the same token
+    # the UI and all other requests use. No minting, no device-flow prompt.
+    _TOKEN_FLOW_JWT=$(python3 -c "
+import json, pathlib, time
+p = pathlib.Path('~/.openclaw/tf_auth.json').expanduser()
+try:
+    d = json.loads(p.read_text())
+    if time.time() < d.get('expires_at', 0) - 60:
+        print(d['token'])
+except Exception:
+    pass
+" 2>/dev/null)
+
+    if [[ -n "$_TOKEN_FLOW_JWT" ]]; then
+      echo "   Auth  : using cached token from ~/.openclaw/tf_auth.json"
+    else
+      echo "   ⚠️  No valid cached token found — run the token-flow service interactively first to authenticate"
+    fi
+
     nohup env \
       ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
       WORKSPACE="${_WORKSPACE}" \
@@ -204,7 +223,7 @@ for p in ['~/.openclaw/agents/main/agent/auth-profiles.json']:
       MEMORY_DISTILL_QUEUE_URL="${_QUEUE_URL}" \
       TOKEN_FLOW_API_URL="${_API_URL}" \
       DATABASE_URL="${_DATABASE_URL}" \
-      SKIP_STARTUP_AUTH=true \
+      TOKEN_FLOW_JWT="${_TOKEN_FLOW_JWT}" \
       PYTHONUNBUFFERED=1 \
       python3 -u "${SCRIPT_DIR}/memory_distill.py" poll-sqs \
         --output "${_MEMORY_DIR}/distilled.md" \
