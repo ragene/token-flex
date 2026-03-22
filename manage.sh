@@ -80,14 +80,30 @@ for p in [
       "S3_BUCKET=${_S3_BUCKET}"
     )
 
-    nohup env "${_env[@]}" python3 "$SERVER_SCRIPT" >> "$LOG_FILE" 2>&1 &
+    nohup env "${_env[@]}" PYTHONUNBUFFERED=1 python3 -u "$SERVER_SCRIPT" >> "$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"
-    sleep 1
-    if _is_running; then
+
+    # Wait up to 120s for the service to become healthy (Auth0 device flow can take a while)
+    echo "   Waiting for service to become healthy..."
+    _deadline=$(( $(date +%s) + 120 ))
+    _ready=0
+    while [[ $(date +%s) -lt $_deadline ]]; do
+      if ! _is_running; then
+        echo "❌ Process exited before becoming healthy. Check $LOG_FILE"
+        exit 1
+      fi
+      if curl -sf "http://localhost:${PORT}/health" >/dev/null 2>&1; then
+        _ready=1
+        break
+      fi
+      sleep 2
+    done
+
+    if [[ $_ready -eq 1 ]]; then
       echo "✅ token-flow started (PID $(cat "$PID_FILE")) on port ${PORT}"
       echo "   Logs: $LOG_FILE"
     else
-      echo "❌ Failed to start. Check $LOG_FILE"
+      echo "❌ Service did not become healthy within 120s. Check $LOG_FILE"
       exit 1
     fi
     ;;
