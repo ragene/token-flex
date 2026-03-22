@@ -1,18 +1,97 @@
 #!/usr/bin/env bash
 # token-flow service manager
 # Usage: manage.sh [start|stop|restart|status|install-deps]
+# Supports: Linux, macOS
 set -euo pipefail
 
 PORT="${TOKEN_FLOW_PORT:-8001}"
-PID_FILE="/tmp/token-flow.pid"
-LOG_FILE="/tmp/token-flow.log"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVER_SCRIPT="${SCRIPT_DIR}/main.py"
+
+# ── OS detection ─────────────────────────────────────────────────────────────
+OS="$(uname -s)"
+case "$OS" in
+  Linux*)  PLATFORM="linux" ;;
+  Darwin*) PLATFORM="mac"   ;;
+  *)       PLATFORM="unknown" ;;
+esac
+
+# ── Platform-specific paths ───────────────────────────────────────────────────
+if [[ "$PLATFORM" == "mac" ]]; then
+  TMP_DIR="${TMPDIR:-/tmp}"
+  DEFAULT_DB="$HOME/.openclaw/data/token_flow.db"
+  DEFAULT_WORKSPACE="$HOME/.openclaw/workspace"
+  DEFAULT_MEMORY_DIR="$HOME/.openclaw/workspace/memory"
+  DEFAULT_SESSIONS_DIR="$HOME/.openclaw/agents/main/sessions"
+  DEFAULT_AUTH_PROFILES="$HOME/.openclaw/agents/main/agent/auth-profiles.json"
+  DEFAULT_TF_AUTH="$HOME/.openclaw/tf_auth.json"
+else
+  TMP_DIR="/tmp"
+  DEFAULT_DB="/home/ec2-user/.openclaw/data/token_flow.db"
+  DEFAULT_WORKSPACE="/home/ec2-user/.openclaw/workspace"
+  DEFAULT_MEMORY_DIR="/home/ec2-user/.openclaw/workspace/memory"
+  DEFAULT_SESSIONS_DIR="/home/ec2-user/.openclaw/agents/main/sessions"
+  DEFAULT_AUTH_PROFILES="/home/ec2-user/.openclaw/agents/main/agent/auth-profiles.json"
+  DEFAULT_TF_AUTH="/home/ec2-user/.openclaw/tf_auth.json"
+fi
+
+PID_FILE="${TMP_DIR}/token-flow.pid"
+LOG_FILE="${TMP_DIR}/token-flow.log"
 
 cmd="${1:-status}"
 
 _is_running() {
   [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
+}
+
+# Returns PID using the port (cross-platform), or empty string
+_pid_on_port() {
+  local pid=""
+  if [[ "$PLATFORM" == "mac" ]]; then
+    pid=$(lsof -ti tcp:"$PORT" -sTCP:LISTEN 2>/dev/null | head -1 || true)
+  else
+    # Linux: try ss first, fall back to /proc/net/tcp
+    if command -v ss &>/dev/null; then
+      pid=$(ss -tlnp "sport = :${PORT}" 2>/dev/null | awk 'NR>1 {match($6,/pid=([0-9]+)/,a); if(a[1]) print a[1]}' | head -1 || true)
+    fi
+    if [[ -z "$pid" ]]; then
+      local _hex_port; _hex_port=$(printf '%04X' "$PORT")
+      local _inode; _inode=$(awk "toupper(\$2) ~ /0\\.0\\.0\\.0:${_hex_port}/ && \$4 == \"0A\" {print \$10; exit}" /proc/net/tcp 2>/dev/null || true)
+      if [[ -n "$_inode" ]]; then
+        pid=$(grep -rl "socket:\[${_inode}\]" /proc/*/fd 2>/dev/null | head -1 | grep -o '/proc/[0-9]*' | grep -o '[0-9]*' || true)
+      fi
+    fi
+  fi
+  echo "$pid"
+}
+
+# Resolve ANTHROPIC_API_KEY from env or OpenClaw auth-profiles
+_resolve_api_key() {
+  if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
+    local _key
+    _key=$(python3 -c "
+import json, pathlib
+for p in ['${DEFAULT_AUTH_PROFILES}']:
+    try:
+        data = json.loads(pathlib.Path(p).expanduser().read_text())
+        for name, prof in data.get('profiles', {}).items():
+            if 'anthropic' in name.lower():
+                k = prof.get('key', '')
+                if k.startswith('sk-ant'):
+                    print(k); raise SystemExit(0)
+    except SystemExit: raise
+    except: pass
+" 2>/dev/null || true)
+    if [[ -n "$_key" ]]; then
+      export ANTHROPIC_API_KEY="$_key"
+      echo "   API key: resolved from OpenClaw auth-profiles"
+    else
+      echo "   ⚠️  ANTHROPIC_API_KEY not found — Claude summarization will use fallback mode"
+      echo "   Set it with: export ANTHROPIC_API_KEY=sk-ant-... before running start"
+    fi
+  else
+    echo "   API key: found in environment"
+  fi
 }
 
 case "$cmd" in
@@ -28,77 +107,33 @@ case "$cmd" in
       exit 0
     fi
 
-    # Check if something else is already holding the port (stale process, no PID file)
-    # Use /proc/net/tcp directly — works without ss/netstat
-    _stale_pid=""
-    _hex_port=$(printf '%04X' "$PORT")
-    # State 0A = LISTEN in /proc/net/tcp
-    if awk "toupper(\$2) ~ /0\\.0\\.0\\.0:${_hex_port}/ && \$4 == \"0A\" {found=1} END {exit !found}" /proc/net/tcp 2>/dev/null; then
-      # Port is in LISTEN — find which PID owns the socket inode
-      _inode=$(awk "toupper(\$2) ~ /0\\.0\\.0\\.0:${_hex_port}/ && \$4 == \"0A\" {print \$10; exit}" /proc/net/tcp 2>/dev/null)
-      if [[ -n "$_inode" ]]; then
-        _stale_pid=$(grep -rl "socket:\[${_inode}\]" /proc/*/fd 2>/dev/null | head -1 | grep -o '/proc/[0-9]*' | grep -o '[0-9]*' || true)
-      fi
-    fi
+    # Kill any stale/untracked process on the port
+    _stale_pid="$(_pid_on_port)"
     if [[ -n "$_stale_pid" ]]; then
-      echo "⚠️  Port ${PORT} already in use by PID ${_stale_pid} (stale/untracked process) — killing it..."
+      echo "⚠️  Port ${PORT} already in use by PID ${_stale_pid} (stale/untracked) — killing it..."
       kill -9 "$_stale_pid" 2>/dev/null || true
       sleep 1
       echo "   Cleared."
     fi
 
-    # Resolve ANTHROPIC_API_KEY — env first, then OpenClaw auth-profiles.json
-    if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-      _key=$(python3 -c "
-import json, pathlib
-for p in [
-    '~/.openclaw/agents/main/agent/auth-profiles.json',
-]:
-    try:
-        data = json.loads(pathlib.Path(p).expanduser().read_text())
-        profiles = data.get('profiles', {})
-        for name, prof in profiles.items():
-            if 'anthropic' in name.lower():
-                k = prof.get('key', '')
-                if k.startswith('sk-ant'):
-                    print(k)
-                    raise SystemExit(0)
-    except SystemExit:
-        raise
-    except:
-        pass
-" 2>/dev/null)
-      if [[ -n "$_key" ]]; then
-        export ANTHROPIC_API_KEY="$_key"
-        echo "   API key: resolved from OpenClaw auth-profiles"
-      else
-        echo "   ⚠️  ANTHROPIC_API_KEY not found — Claude summarization will use fallback mode"
-        echo "   Set it with: export ANTHROPIC_API_KEY=sk-ant-... before running start"
-      fi
-    else
-      echo "   API key: found in environment"
-    fi
+    _resolve_api_key
 
-    # Build env for the subprocess — only pass non-empty overrides so defaults survive
-    _env=(
-      "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}"
-      "TOKEN_FLOW_PORT=${PORT}"
-    )
-    # Defaults for path vars — can be overridden by caller env
-    _TOKEN_FLOW_DB="${TOKEN_FLOW_DB:-/home/ec2-user/.openclaw/data/token_flow.db}"
-    _WORKSPACE="${WORKSPACE:-/home/ec2-user/.openclaw/workspace}"
-    _MEMORY_DIR="${MEMORY_DIR:-/home/ec2-user/.openclaw/workspace/memory}"
-    _SESSIONS_DIR="${SESSIONS_DIR:-/home/ec2-user/.openclaw/agents/main/sessions}"
-    _S3_BUCKET="${S3_BUCKET:-smart-memory}"
-
-    # Load .env if present (allows local overrides without editing this script)
+    # Load .env if present
     if [[ -f "${SCRIPT_DIR}/.env" ]]; then
       set -o allexport
       source "${SCRIPT_DIR}/.env"
       set +o allexport
     fi
 
-    _env+=(
+    _TOKEN_FLOW_DB="${TOKEN_FLOW_DB:-${DEFAULT_DB}}"
+    _WORKSPACE="${WORKSPACE:-${DEFAULT_WORKSPACE}}"
+    _MEMORY_DIR="${MEMORY_DIR:-${DEFAULT_MEMORY_DIR}}"
+    _SESSIONS_DIR="${SESSIONS_DIR:-${DEFAULT_SESSIONS_DIR}}"
+    _S3_BUCKET="${S3_BUCKET:-smart-memory}"
+
+    _env=(
+      "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}"
+      "TOKEN_FLOW_PORT=${PORT}"
       "TOKEN_FLOW_DB=${_TOKEN_FLOW_DB}"
       "WORKSPACE=${_WORKSPACE}"
       "MEMORY_DIR=${_MEMORY_DIR}"
@@ -113,7 +148,6 @@ for p in [
     nohup env "${_env[@]}" PYTHONUNBUFFERED=1 python3 -u "$SERVER_SCRIPT" >> "$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"
 
-    # Wait up to 120s for the service to become healthy (Auth0 device flow can take a while)
     echo "   Waiting for service to become healthy..."
     _deadline=$(( $(date +%s) + 120 ))
     _ready=0
@@ -163,65 +197,48 @@ for p in [
     ;;
 
   start-poller)
-    POLLER_PID_FILE="/tmp/token-flow-poller.pid"
-    POLLER_LOG_FILE="/tmp/token-flow-poller.log"
+    POLLER_PID_FILE="${TMP_DIR}/token-flow-poller.pid"
+    POLLER_LOG_FILE="${TMP_DIR}/token-flow-poller.log"
 
     if [[ -f "$POLLER_PID_FILE" ]] && kill -0 "$(cat "$POLLER_PID_FILE")" 2>/dev/null; then
       echo "⚠️  SQS poller already running (PID $(cat "$POLLER_PID_FILE"))"
       exit 0
     fi
 
-    # Resolve ANTHROPIC_API_KEY same as start
-    if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-      _key=$(python3 -c "
-import json, pathlib
-for p in ['~/.openclaw/agents/main/agent/auth-profiles.json']:
-    try:
-        data = json.loads(pathlib.Path(p).expanduser().read_text())
-        for name, prof in data.get('profiles', {}).items():
-            if 'anthropic' in name.lower():
-                k = prof.get('key', '')
-                if k.startswith('sk-ant'):
-                    print(k); raise SystemExit(0)
-    except SystemExit: raise
-    except: pass
-" 2>/dev/null)
-      [[ -n "$_key" ]] && export ANTHROPIC_API_KEY="$_key"
+    _resolve_api_key
+
+    # Load .env if present
+    if [[ -f "${SCRIPT_DIR}/.env" ]]; then
+      set -o allexport
+      source "${SCRIPT_DIR}/.env"
+      set +o allexport
     fi
 
-    _WORKSPACE="${WORKSPACE:-/home/ec2-user/.openclaw/workspace}"
-    _MEMORY_DIR="${MEMORY_DIR:-/home/ec2-user/.openclaw/workspace/memory}"
+    _WORKSPACE="${WORKSPACE:-${DEFAULT_WORKSPACE}}"
+    _MEMORY_DIR="${MEMORY_DIR:-${DEFAULT_MEMORY_DIR}}"
     _QUEUE_URL="${MEMORY_DISTILL_QUEUE_URL:-https://sqs.us-west-2.amazonaws.com/531948420901/freightdawg-memory-distill}"
     _API_URL="${TOKEN_FLOW_API_URL:-http://localhost:${PORT}}"
-
-    _TOKEN_FLOW_DB="${TOKEN_FLOW_DB:-/home/ec2-user/.openclaw/data/token_flow.db}"
+    _TOKEN_FLOW_DB="${TOKEN_FLOW_DB:-${DEFAULT_DB}}"
     _DATABASE_URL="${DATABASE_URL:-sqlite:///${_TOKEN_FLOW_DB}}"
 
-    # Read the cached token written by the Auth0 device-flow — the same token
-    # the UI and all other requests use. No minting, no device-flow prompt.
     _TOKEN_FLOW_JWT=$(python3 -c "
 import json, pathlib, time
-p = pathlib.Path('~/.openclaw/tf_auth.json').expanduser()
+p = pathlib.Path('${DEFAULT_TF_AUTH}').expanduser()
 try:
     d = json.loads(p.read_text())
     if time.time() < d.get('expires_at', 0) - 60:
         print(d['token'])
 except Exception:
     pass
-" 2>/dev/null)
+" 2>/dev/null || true)
 
     if [[ -n "$_TOKEN_FLOW_JWT" ]]; then
-      echo "   Auth  : using cached token from ~/.openclaw/tf_auth.json"
+      echo "   Auth  : using cached token from ${DEFAULT_TF_AUTH}"
     else
-      echo "   ⚠️  No valid cached token found — run the token-flow service interactively first to authenticate"
+      echo "   ⚠️  No valid cached token — run the token-flow service first to authenticate"
     fi
 
-    # Also export TOKEN_FLOW_UI_URL so push_snapshot() in the poller sends to the
-    # correct remote ECS endpoint rather than the default hardcoded URL.
     _TOKEN_FLOW_UI_URL="${TOKEN_FLOW_UI_URL:-}"
-    if [[ -f "${SCRIPT_DIR}/.env" ]] && [[ -z "$_TOKEN_FLOW_UI_URL" ]]; then
-      _TOKEN_FLOW_UI_URL=$(grep -E '^TOKEN_FLOW_UI_URL=' "${SCRIPT_DIR}/.env" | cut -d= -f2- | tr -d '"' || true)
-    fi
 
     nohup env \
       ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
@@ -250,7 +267,7 @@ except Exception:
     ;;
 
   stop-poller)
-    POLLER_PID_FILE="/tmp/token-flow-poller.pid"
+    POLLER_PID_FILE="${TMP_DIR}/token-flow-poller.pid"
     if [[ -f "$POLLER_PID_FILE" ]] && kill -0 "$(cat "$POLLER_PID_FILE")" 2>/dev/null; then
       kill "$(cat "$POLLER_PID_FILE")" && rm -f "$POLLER_PID_FILE"
       echo "✅ SQS poller stopped."
@@ -260,7 +277,7 @@ except Exception:
     ;;
 
   status-poller)
-    POLLER_PID_FILE="/tmp/token-flow-poller.pid"
+    POLLER_PID_FILE="${TMP_DIR}/token-flow-poller.pid"
     if [[ -f "$POLLER_PID_FILE" ]] && kill -0 "$(cat "$POLLER_PID_FILE")" 2>/dev/null; then
       echo "✅ SQS poller running (PID $(cat "$POLLER_PID_FILE"))"
     else
