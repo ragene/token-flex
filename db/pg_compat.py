@@ -131,16 +131,8 @@ class Connection:
                 if row:
                     wrapper.lastrowid = row[0]
             except Exception:
-                # If RETURNING fails (e.g. table has no id col), roll back the
-                # aborted transaction first, then retry without RETURNING.
-                # Without this rollback, psycopg2 leaves the connection in an
-                # "aborted transaction" state and every subsequent statement fails.
-                try:
-                    self._conn.rollback()
-                except Exception:
-                    pass
-                cur2 = self._conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-                cur2.execute(_adapt_sql(sql), params or ())
+                # If RETURNING fails (e.g. table has no id col), fall back
+                cur.execute(_adapt_sql(sql), params or ())
         else:
             cur.execute(adapted, params or ())
 
