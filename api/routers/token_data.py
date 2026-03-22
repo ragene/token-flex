@@ -393,11 +393,14 @@ async def token_data_ws(websocket: WebSocket, token: Optional[str] = None) -> No
 
     - Authenticates via ?token=<jwt> query param (browsers can't set WS headers).
     - When authenticated, all snapshot data is filtered to the requesting user's email.
-    - On connect: immediately sends the current user-scoped snapshot.
-    - On new record / push: client receives a refreshed user-scoped snapshot on next ping.
-    - Clients can send any text (e.g. "ping") to request an immediate refresh.
+    - On connect: immediately sends the current user-scoped snapshot (fresh, not cached).
+    - Every PUSH_INTERVAL seconds: server proactively pushes a fresh user-scoped snapshot.
+    - Clients can also send any text (e.g. "ping") to request an immediate refresh.
     """
+    import asyncio
     from api.auth import AUTH0_DOMAIN
+
+    PUSH_INTERVAL = 10  # seconds between server-initiated pushes
 
     # Authenticate — require token when AUTH0_DOMAIN is configured
     user_email: Optional[str] = None
@@ -415,19 +418,27 @@ async def token_data_ws(websocket: WebSocket, token: Optional[str] = None) -> No
     database_url: str = websocket.app.state.database_url
     await ws_manager.connect(websocket)
     try:
-        # Always build a fresh user-scoped snapshot on connect (don't use shared cache
-        # since each user sees different data)
+        # Always send a fresh user-scoped snapshot on connect — do NOT use the shared
+        # last_snapshot cache since each user sees different session/token data.
         initial = _build_snapshot(database_url, user_email=user_email)
-        await ws_manager.send_initial(websocket, initial)
+        await websocket.send_text(_json.dumps(initial, default=_json_default))
 
-        # Keep alive; respond to pings with a fresh user-scoped snapshot
+        # Periodic push loop: wait up to PUSH_INTERVAL for a client ping, then push
+        # a fresh snapshot regardless.  This keeps session token counts live without
+        # the client needing to poll manually.
         while True:
             try:
-                _ = await websocket.receive_text()
-                snapshot = _build_snapshot(database_url, user_email=user_email)
-                await websocket.send_text(_json.dumps(snapshot, default=_json_default))
+                _ = await asyncio.wait_for(websocket.receive_text(), timeout=PUSH_INTERVAL)
+            except asyncio.TimeoutError:
+                pass  # interval elapsed — fall through to push
             except WebSocketDisconnect:
                 break
+
+            snapshot = _build_snapshot(database_url, user_email=user_email)
+            try:
+                await websocket.send_text(_json.dumps(snapshot, default=_json_default))
+            except Exception:
+                break  # client gone
     finally:
         ws_manager.disconnect(websocket)
 
