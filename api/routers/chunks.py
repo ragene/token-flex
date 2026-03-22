@@ -276,7 +276,7 @@ async def current_session(request: Request) -> CurrentSessionOut:
     )
 
 
-@router.post("/session/identify", status_code=200)
+@router.post("/session/identify", status_code=200, dependencies=[])
 async def identify_local_session(body: IdentifyRequest, request: Request) -> dict:
     """
     Called by the local service at startup to register the authenticated user.
