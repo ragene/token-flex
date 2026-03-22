@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 import anthropic
@@ -109,9 +110,9 @@ def summarize_top_chunks(
     logger.info("Summarizing top %d / %d unsummarized chunks (%.0f%%)", take, total, top_pct * 100)
 
     client = anthropic.Anthropic()
-    summarized = 0
 
-    for row_id, content, composite_score in top_rows:
+    def _summarize_one(row):
+        row_id, content, _score = row
         prompt = _SUMMARIZE_PROMPT.format(
             context_hint=context_hint or "memory/session content",
             content=content[:4000],
@@ -123,30 +124,35 @@ def summarize_top_chunks(
                 messages=[{"role": "user", "content": prompt}],
             )
             summary = msg.content[0].text.strip()
-            # Strip stray markdown fences just in case
             summary = re.sub(r"^```[a-z]*\s*", "", summary)
             summary = re.sub(r"\s*```$", "", summary)
-            # Record token usage
+            return row_id, summary, msg.usage.input_tokens, msg.usage.output_tokens, None
+        except Exception as e:
+            logger.error("Summarization failed for chunk id=%d: %s", row_id, e)
+            return row_id, content[:300], 0, 0, str(e)
+
+    max_workers = min(10, len(top_rows))
+    results = []
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_summarize_one, row): row for row in top_rows}
+        for future in as_completed(futures):
+            results.append(future.result())
+
+    summarized = 0
+    for row_id, summary, prompt_tokens, completion_tokens, err in results:
+        conn.execute(
+            "UPDATE chunk_cache SET summary = ?, is_summarized = 1 WHERE id = ?",
+            (summary, row_id),
+        )
+        if not err:
             _record_token_usage(
                 conn=conn,
                 operation="summarize",
                 model=_HAIKU_MODEL,
-                prompt_tokens=msg.usage.input_tokens,
-                completion_tokens=msg.usage.output_tokens,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
                 source_label=f"chunk:{row_id}",
             )
-        except Exception as e:
-            logger.error("Summarization failed for chunk id=%d: %s", row_id, e)
-            summary = content[:300]  # fallback: first 300 chars
-
-        conn.execute(
-            """
-            UPDATE chunk_cache
-            SET summary = ?, is_summarized = 1
-            WHERE id = ?
-            """,
-            (summary, row_id),
-        )
         summarized += 1
 
     conn.commit()
