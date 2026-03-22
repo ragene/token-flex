@@ -34,9 +34,11 @@ def _init_conn(url: str):
 
 if __name__ == "__main__":
     # Init DB schema on startup
+    print(f"🔧 token-flow: connecting to DB...")
     conn = _init_conn(DATABASE_URL)
     init_db(conn)
     conn.close()
+    print(f"🔧 token-flow: DB schema initialized")
 
     db_label = "SQLite (local)" if DATABASE_URL.startswith("sqlite") else "PostgreSQL"
     print(f"🔧 token-flow service starting on http://localhost:{PORT}")

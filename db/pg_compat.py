@@ -238,6 +238,6 @@ def connect(database_url: str):
         import sqlite3 as _sq
         path = database_url.replace("sqlite:///", "")
         return _SqliteConnection(_sq.connect(path))
-    pg_conn = psycopg2.connect(database_url)
+    pg_conn = psycopg2.connect(database_url, connect_timeout=10)
     pg_conn.autocommit = False
     return Connection(pg_conn)
