@@ -336,6 +336,11 @@ def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict
             memory_entries  = pushed.get("memory_entries")  or memory_entries
         if not pipeline_events:
             pipeline_events = pushed.get("pipeline_events") or pipeline_events
+        # chunk_cache in remote Postgres is always empty — the local pipeline writes
+        # to SQLite only and pushes chunks as part of the snapshot payload.
+        # Use push_cache chunks as the source of truth when the DB has none.
+        if not chunks and pushed.get("chunks"):
+            chunks = pushed["chunks"]
     else:
         tokens, session = _build_tokens_and_session(database_url, user_email=user_email)
 
@@ -532,10 +537,15 @@ async def push_snapshot(body: PushSnapshotIn, request: Request) -> dict:
 
 # ── Record endpoint ───────────────────────────────────────────────────────────
 
-@router.post("/token-data/record", response_model=TokenUsageOut, status_code=201, dependencies=[Depends(verify_token)])
-async def record_usage(body: TokenUsageIn, request: Request) -> TokenUsageOut:
+@router.post("/token-data/record", response_model=TokenUsageOut, status_code=201)
+async def record_usage(body: TokenUsageIn, request: Request, token_payload: Optional[dict] = Depends(verify_token)) -> TokenUsageOut:
     """Write a single AI call token-usage row and broadcast a fresh snapshot to WS clients."""
     total = body.total_tokens if body.total_tokens is not None else (body.prompt_tokens + body.completion_tokens)
+    # Auto-populate user_email from JWT when not provided in body — prevents NULL
+    # user_email which causes the user-scoped summary/events endpoints to return nothing.
+    user_email = body.user_email
+    if user_email is None:
+        user_email = get_current_user_email(token_payload)
     database_url: str = get_db_url(request)
     conn = _conn(request)
     try:
@@ -544,7 +554,7 @@ async def record_usage(body: TokenUsageIn, request: Request) -> TokenUsageOut:
                (user_email, operation, model, prompt_tokens, completion_tokens,
                 total_tokens, cost_usd, source_label)
                VALUES (?,?,?,?,?,?,?,?)""",
-            (body.user_email, body.operation, body.model,
+            (user_email, body.operation, body.model,
              body.prompt_tokens, body.completion_tokens,
              total, body.cost_usd, body.source_label),
         )

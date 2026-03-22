@@ -102,16 +102,59 @@ async def list_summaries(
     finally:
         conn.close()
 
-    return [
-        SummaryOut(
-            id=r["id"],
-            source_label=r["source_label"],
-            chunk_index=r["chunk_index"],
-            summary=r["summary"],
-            composite_score=r["composite_score"] or 0.0,
-            pushed_to_s3_at=str(r["pushed_to_s3_at"]) if r["pushed_to_s3_at"] else None,
-            s3_key=r["s3_key"],
-            created_at=str(r["created_at"]) if r["created_at"] else None,
-        )
-        for r in rows
-    ]
+    if rows:
+        return [
+            SummaryOut(
+                id=r["id"],
+                source_label=r["source_label"],
+                chunk_index=r["chunk_index"],
+                summary=r["summary"],
+                composite_score=r["composite_score"] or 0.0,
+                pushed_to_s3_at=str(r["pushed_to_s3_at"]) if r["pushed_to_s3_at"] else None,
+                s3_key=r["s3_key"],
+                created_at=str(r["created_at"]) if r["created_at"] else None,
+            )
+            for r in rows
+        ]
+
+    # chunk_cache in remote Postgres is always empty — the local pipeline writes to
+    # SQLite only and syncs via push_snapshot.  Fall back to push_cache chunks so
+    # the Summaries page shows data after a distill+clear cycle.
+    try:
+        from db.pg_compat import connect as pg_connect
+        from api.db_helper import get_db_url
+        import json as _json
+        database_url: str = get_db_url(request)
+        c2 = pg_connect(database_url)
+        try:
+            row = c2.execute("SELECT payload FROM push_cache WHERE id = 1").fetchone()
+        finally:
+            c2.close()
+        if row:
+            pushed = _json.loads(row[0])
+            cached_chunks = pushed.get("chunks") or []
+            # Filter to summarized chunks only; apply source filter if given
+            filtered = [
+                c for c in cached_chunks
+                if c.get("is_summarized") and c.get("summary")
+                and (not source or str(c.get("source_label", "")).startswith(source))
+            ]
+            filtered.sort(key=lambda c: c.get("composite_score") or 0.0, reverse=True)
+            filtered = filtered[:limit]
+            return [
+                SummaryOut(
+                    id=c.get("id", 0),
+                    source_label=c.get("source_label"),
+                    chunk_index=c.get("chunk_index", 0),
+                    summary=c.get("summary", ""),
+                    composite_score=float(c.get("composite_score") or 0.0),
+                    pushed_to_s3_at=str(c["pushed_to_s3_at"]) if c.get("pushed_to_s3_at") else None,
+                    s3_key=c.get("s3_key"),
+                    created_at=str(c["created_at"]) if c.get("created_at") else None,
+                )
+                for c in filtered
+            ]
+    except Exception:
+        pass
+
+    return []

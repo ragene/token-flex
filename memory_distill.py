@@ -665,13 +665,20 @@ def run_distill_and_clear(args_ns, triggered_by: str = "unknown", auth_token: st
     # zero-summary payload directly so the UI blanks immediately without waiting
     # for the next 30-second push cycle.
     try:
-        from api.push_client import push_snapshot, _build_token_data, _build_session_data
+        from api.push_client import push_snapshot, _build_token_data, _build_session_data, _build_snapshot as _push_build_snapshot
         _db_url = (
             os.environ.get("DATABASE_URL", "").strip()
             or f"sqlite:///{os.environ.get('TOKEN_FLOW_DB', '/home/ec2-user/.openclaw/data/token_flow.db')}"
         )
-        # Build a zeroed-out summary/events payload — we just cleared token_usage
-        _zero_payload = {
+        # Build a full snapshot from the local DB so chunks/memory_entries/pipeline_events
+        # are preserved.  Only zero out token_usage summary + events (just cleared above).
+        # This ensures the Summaries page continues to show Haiku-summarized chunk data
+        # after a distill+clear cycle.
+        try:
+            _full_snap = _push_build_snapshot(_db_url)
+        except Exception:
+            _full_snap = {}
+        _post_distill_payload = {
             "ts": _dt.utcnow().isoformat() + "Z",
             "summary": {
                 "rows": [],
@@ -680,14 +687,15 @@ def run_distill_and_clear(args_ns, triggered_by: str = "unknown", auth_token: st
                 "grand_cost_usd": 0.0,
             },
             "events": [],
-            "chunks": [],
-            "memory_entries": [],
-            "pipeline_events": [],
+            # Preserve chunks, memory_entries, pipeline_events from local DB
+            "chunks":          _full_snap.get("chunks", []),
+            "memory_entries":  _full_snap.get("memory_entries", []),
+            "pipeline_events": _full_snap.get("pipeline_events", []),
             "tokens": _build_token_data(),
             "session": _build_session_data(),
         }
-        push_snapshot(_db_url, payload=_zero_payload)
-        print(f"  ✅ Pushed fresh snapshot to UI after distill+clear")
+        push_snapshot(_db_url, payload=_post_distill_payload)
+        print(f"  ✅ Pushed fresh snapshot to UI after distill+clear ({len(_post_distill_payload['chunks'])} chunks preserved)")
     except Exception as e:
         print(f"  ⚠️  Could not push post-distill snapshot: {e}")
 
