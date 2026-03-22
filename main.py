@@ -63,6 +63,15 @@ if __name__ == "__main__":
 
     if _skip_auth:
         print("🔐 SSO: skipping startup auth (SKIP_STARTUP_AUTH=true)")
+        # If TOKEN_FLOW_JWT is pre-set in env/.env, cache it so push_client picks it up
+        _preset_jwt = os.environ.get("TOKEN_FLOW_JWT", "").strip()
+        if _preset_jwt:
+            try:
+                from api.device_auth import _save_cache
+                _save_cache(_preset_jwt, expires_in=365 * 24 * 3600)
+                print("🔐 SSO: TOKEN_FLOW_JWT cached from env")
+            except Exception as _e:
+                print(f"⚠️  Could not cache TOKEN_FLOW_JWT: {_e}")
     else:
         try:
             from api.device_auth import _load_cache, get_cached_user, _device_flow
