@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
-import { getTokenExportUrl } from '../api.js'
+import { getTokenExportUrl, postDistillAndClear } from '../api.js'
 
 // In production VITE_API_URL is empty — derive WS URL from current window origin
 // so it routes through Envoy on the same host. For local dev set VITE_API_URL=http://localhost:8001.
@@ -120,6 +120,7 @@ export default function TokenData() {
       try {
         const data = JSON.parse(e.data)
         if (data.error) { setError(data.error); return }
+        if (data.keepalive) return  // server keepalive ping — ignore, don't wipe state
         setSnap(data)
         setLastUpdated(new Date(data.ts))
         setError(null)
@@ -173,13 +174,7 @@ export default function TokenData() {
     setDistillStatus('pending')
     setDistillMsg('')
     try {
-      const _API_BASE = import.meta.env.VITE_API_URL || ''
-      const res = await fetch(`${_API_BASE}/token-data/distill`, { method: 'POST' })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.detail || `HTTP ${res.status}`)
-      }
-      const data = await res.json()
+      const data = await postDistillAndClear()
       setDistillStatus('queued')
       setDistillMsg(`✅ Queued (msg: ${data.message_id}) — local service will process shortly.`)
       // Refresh WS data after a delay
@@ -189,7 +184,7 @@ export default function TokenData() {
       }, 8000)
     } catch (e) {
       setDistillStatus('error')
-      setDistillMsg(`⚠️ ${e.message || 'Failed to queue distill trigger'}`)
+      setDistillMsg(`⚠️ ${e?.response?.data?.detail || e.message || 'Failed to queue distill trigger'}`)
     }
   }
 

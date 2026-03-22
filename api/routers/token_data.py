@@ -723,6 +723,7 @@ async def clear_token_usage(request: Request) -> dict:
     Delete all token_usage rows. Called by the local service after distillation completes,
     or manually from the dashboard.
     """
+    database_url: str = request.app.state.database_url
     conn = _conn(request)
     try:
         count = conn.execute("SELECT COUNT(*) FROM token_usage").fetchone()[0]
@@ -732,8 +733,38 @@ async def clear_token_usage(request: Request) -> dict:
     finally:
         conn.close()
 
-    # Push empty snapshot to all WS clients
-    database_url: str = request.app.state.database_url
+    # Patch push_cache summary to zeros so next WS snapshot reflects the clear
+    # immediately, without waiting for the next local push cycle.
+    try:
+        cached = _load_push_cache(database_url)
+        if cached:
+            cached["summary"] = {
+                "rows": [],
+                "grand_total_tokens": 0,
+                "grand_total_calls": 0,
+                "grand_cost_usd": 0.0,
+            }
+            cached["events"] = []
+            cached["ts"] = datetime.utcnow().isoformat() + "Z"
+            conn2 = _conn(request)
+            try:
+                payload_json = _json.dumps(cached)
+                cur = conn2.execute(
+                    "UPDATE push_cache SET payload = ?, updated_at = NOW() WHERE id = 1",
+                    (payload_json,),
+                )
+                if cur.rowcount == 0:
+                    conn2.execute(
+                        "INSERT INTO push_cache (id, payload, updated_at) VALUES (1, ?, NOW())",
+                        (payload_json,),
+                    )
+                conn2.commit()
+            finally:
+                conn2.close()
+    except Exception as exc:
+        log.debug("push_cache patch after clear failed (non-fatal): %s", exc)
+
+    # Broadcast fresh snapshot to all connected WS clients
     snapshot = _build_snapshot(database_url)
     await ws_manager.broadcast(snapshot)
 

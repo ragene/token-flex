@@ -123,7 +123,7 @@ def create_app(database_url: str) -> FastAPI:
                         push_snapshot(database_url)
                     except Exception as exc:
                         logger.debug("session push loop error (non-fatal): %s", exc)
-                    await asyncio.sleep(10)
+                    await asyncio.sleep(2)
 
             asyncio.create_task(_session_push_loop())
             logger.info("Background session push loop started (local sessions found)")
