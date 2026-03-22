@@ -12,3 +12,4 @@ export const postSummarize = (body) => api.post('/summarize', body).then(r => r.
 export const postIngest = (body) => api.post('/ingest', body).then(r => r.data)
 export const postAutoIngest = () => api.post('/memory/ingest/auto').then(r => r.data)
 export const postMemoryQuery = (body) => api.post('/memory/query', body).then(r => r.data)
+export const postDistillAndClear = () => api.post('/token-data/distill').then(r => r.data)

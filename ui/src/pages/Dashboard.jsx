@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { getTokens } from '../api.js'
+import { getTokens, postDistillAndClear } from '../api.js'
 import StatusBadge from '../components/StatusBadge.jsx'
 import TokenMeter from '../components/TokenMeter.jsx'
 
@@ -20,6 +20,8 @@ export default function Dashboard() {
   const [data, setData] = useState(null)
   const [error, setError] = useState(null)
   const [lastUpdated, setLastUpdated] = useState(null)
+  const [distilling, setDistilling] = useState(false)
+  const [distillResult, setDistillResult] = useState(null)
 
   const fetchData = useCallback(async () => {
     try {
@@ -37,6 +39,20 @@ export default function Dashboard() {
     const iv = setInterval(fetchData, 30000)
     return () => clearInterval(iv)
   }, [fetchData])
+
+  const handleDistill = async () => {
+    if (!window.confirm('Trigger distill & clear? This will summarize session memory and reset token usage.')) return
+    setDistilling(true)
+    setDistillResult(null)
+    try {
+      const res = await postDistillAndClear()
+      setDistillResult({ ok: true, msg: res.message || 'Distill job queued.' })
+    } catch (err) {
+      setDistillResult({ ok: false, msg: err?.response?.data?.detail || err.message || 'Request failed.' })
+    } finally {
+      setDistilling(false)
+    }
+  }
 
   return (
     <div>
@@ -63,8 +79,40 @@ export default function Dashboard() {
           >
             ↻ Refresh
           </button>
+          <button
+            onClick={handleDistill}
+            disabled={distilling}
+            style={{
+              background: distilling ? '#3a1a2a' : '#4a0020',
+              color: distilling ? '#888' : '#f87171',
+              border: '1px solid #7f1d1d',
+              borderRadius: 8,
+              padding: '6px 14px',
+              cursor: distilling ? 'not-allowed' : 'pointer',
+              fontSize: 13,
+              fontWeight: 600,
+            }}
+          >
+            {distilling ? '⏳ Distilling…' : '🧹 Distill & Clear'}
+          </button>
         </div>
       </div>
+
+      {distillResult && (
+        <div style={{
+          ...CARD,
+          borderColor: distillResult.ok ? '#22c55e' : '#ef4444',
+          color: distillResult.ok ? '#22c55e' : '#ef4444',
+          marginBottom: 16,
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+        }}>
+          <span>{distillResult.ok ? '✅' : '❌'} {distillResult.msg}</span>
+          <button onClick={() => setDistillResult(null)}
+            style={{ background: 'transparent', border: 'none', color: '#555', cursor: 'pointer', fontSize: 16 }}>✕</button>
+        </div>
+      )}
 
       {error && (
         <div style={{ ...CARD, borderColor: '#ef4444', color: '#ef4444', marginBottom: 24 }}>
