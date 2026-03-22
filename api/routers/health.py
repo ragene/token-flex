@@ -10,6 +10,6 @@ router = APIRouter(tags=["health"])
 async def health(request: Request) -> dict:
     return {
         "status": "ok",
-        "db": request.app.state.db_path,
+        "db": "postgresql",
         "version": "0.1.0",
     }

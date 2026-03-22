@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import json as _json
 import os
-import sqlite3
+from api.db_helper import get_conn as _get_conn_helper, get_db_url
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
+from api.auth import verify_token
 from pydantic import BaseModel
 
 from db.schema import init_db
@@ -34,20 +35,17 @@ from engine.ingestor import (
     _run_chunk_pipeline_raw,
 )
 
-router = APIRouter(tags=["memory"])
+router = APIRouter(tags=["memory"], dependencies=[Depends(verify_token)])
 
 _DEFAULT_WORKSPACE = "/home/ec2-user/.openclaw/workspace"
 _DEFAULT_MEMORY_DIR = "/home/ec2-user/.openclaw/workspace/memory"
 
 
-def _get_conn(request: Request) -> sqlite3.Connection:
-    db_path: str = request.app.state.db_path
-    conn = sqlite3.connect(db_path)
-    init_db(conn)
-    return conn
+def _get_conn(request: Request):
+    return _get_conn_helper(request)
 
 
-def _db_entry_count(conn: sqlite3.Connection) -> int:
+def _db_entry_count(conn) -> int:
     return conn.execute("SELECT COUNT(*) FROM memory_entries").fetchone()[0]
 
 
@@ -173,7 +171,7 @@ async def ingest_file(body: IngestFileRequest, request: Request) -> IngestResult
         raise HTTPException(status_code=404, detail=f"File not found: {body.path}")
 
     conn = _get_conn(request)
-    db_path: str = request.app.state.db_path
+    db_path: str = get_db_url(request)
     try:
         if body.clear:
             conn.execute("DELETE FROM memory_entries WHERE source_file = ?", (filepath.name,))
@@ -193,7 +191,7 @@ async def ingest_git(body: IngestGitRequest, request: Request) -> IngestResult:
     if not workspace.exists():
         raise HTTPException(status_code=404, detail=f"Workspace not found: {body.workspace}")
 
-    db_path: str = request.app.state.db_path
+    db_path: str = get_db_url(request)
     conn = _get_conn(request)
     try:
         ingested, chunks = ingest_git_history(
@@ -213,7 +211,7 @@ async def ingest_session(body: IngestSessionRequest, request: Request) -> Ingest
     if not filepath.exists():
         raise HTTPException(status_code=404, detail=f"Session file not found: {body.path}")
 
-    db_path: str = request.app.state.db_path
+    db_path: str = get_db_url(request)
     conn = _get_conn(request)
     try:
         ingested, chunks = ingest_session_file(conn, filepath, context_hint=body.context_hint)
@@ -231,7 +229,7 @@ async def ingest_auto(body: IngestAutoRequest, request: Request) -> IngestAutoRe
     memory_dir = Path(os.environ.get("MEMORY_DIR", _DEFAULT_MEMORY_DIR))
     workspace = Path(os.environ.get("WORKSPACE", _DEFAULT_WORKSPACE))
 
-    db_path: str = request.app.state.db_path
+    db_path: str = get_db_url(request)
     conn = _get_conn(request)
     try:
         total_md = 0
@@ -284,7 +282,7 @@ async def full_cycle(body: FullCycleRequest, request: Request) -> FullCycleResul
     memory_dir = Path(os.environ.get("MEMORY_DIR", _DEFAULT_MEMORY_DIR))
     workspace = Path(os.environ.get("WORKSPACE", _DEFAULT_WORKSPACE))
 
-    db_path: str = request.app.state.db_path
+    db_path: str = get_db_url(request)
     conn = _get_conn(request)
     try:
         total_md = 0
@@ -483,7 +481,7 @@ async def query_memory(
 
 @router.post("/memory/rebuild", response_model=RebuildResult)
 async def rebuild(body: RebuildRequest, request: Request) -> RebuildResult:
-    db_path: str = request.app.state.db_path
+    db_path: str = get_db_url(request)
     output_path = Path(body.output_path)
     conn = _get_conn(request)
     try:

@@ -5,20 +5,19 @@ GET  /summaries   — list summarized chunks
 from __future__ import annotations
 
 import os
-import sqlite3
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from api.auth import verify_token
 from pydantic import BaseModel
 
 from engine.summarizer import summarize_top_chunks
 from engine.s3_uploader import push_summaries_to_s3
 from api.push_client import push_snapshot
+from api.db_helper import get_conn, get_db_url
 
-router = APIRouter(tags=["summaries"])
+router = APIRouter(tags=["summaries"], dependencies=[Depends(verify_token)])
 
-
-# ── Request / Response models ────────────────────────────────────────────────
 
 class SummarizeRequest(BaseModel):
     top_pct: float = 0.4
@@ -42,19 +41,13 @@ class SummaryOut(BaseModel):
     created_at: Optional[str]
 
 
-# ── Endpoints ────────────────────────────────────────────────────────────────
-
 @router.post("/summarize", response_model=SummarizeResponse)
 async def run_summarize(body: SummarizeRequest, request: Request) -> SummarizeResponse:
-    """
-    Summarize the top *top_pct* fraction of unsummarized chunks.
-    Optionally push completed summaries to S3.
-    """
     if not (0.0 < body.top_pct <= 1.0):
         raise HTTPException(status_code=422, detail="top_pct must be between 0.0 (exclusive) and 1.0.")
 
-    db_path: str = request.app.state.db_path
-    conn = sqlite3.connect(db_path)
+    database_url: str = get_db_url(request)
+    conn = get_conn(request)
     try:
         summarized = summarize_top_chunks(
             conn,
@@ -74,9 +67,8 @@ async def run_summarize(body: SummarizeRequest, request: Request) -> SummarizeRe
     finally:
         conn.close()
 
-    # Push updated snapshot to token-flow-ui after summarization (best-effort)
     if summarized > 0:
-        push_snapshot(db_path)
+        push_snapshot(database_url)
 
     return SummarizeResponse(summarized=summarized, pushed=pushed)
 
@@ -85,17 +77,15 @@ async def run_summarize(body: SummarizeRequest, request: Request) -> SummarizeRe
 async def list_summaries(
     request: Request,
     limit: int = Query(default=50, ge=1, le=500),
-    source: Optional[str] = Query(default=None, description="Filter by source_label (prefix match)"),
+    source: Optional[str] = Query(default=None),
 ) -> List[SummaryOut]:
-    """Return summarized chunks ordered by composite_score descending."""
-    db_path: str = request.app.state.db_path
-    conn = sqlite3.connect(db_path)
+    conn = get_conn(request)
     try:
         conditions = ["is_summarized = 1", "summary IS NOT NULL"]
         params: list = []
 
         if source:
-            conditions.append("source_label LIKE ?")
+            conditions.append("source_label LIKE %s")
             params.append(f"{source}%")
 
         where = "WHERE " + " AND ".join(conditions)
@@ -105,7 +95,7 @@ async def list_summaries(
             FROM chunk_cache
             {where}
             ORDER BY composite_score DESC
-            LIMIT ?
+            LIMIT %s
         """
         params.append(limit)
         rows = conn.execute(sql, params).fetchall()
@@ -114,14 +104,14 @@ async def list_summaries(
 
     return [
         SummaryOut(
-            id=r[0],
-            source_label=r[1],
-            chunk_index=r[2],
-            summary=r[3],
-            composite_score=r[4] or 0.0,
-            pushed_to_s3_at=r[5],
-            s3_key=r[6],
-            created_at=r[7],
+            id=r["id"],
+            source_label=r["source_label"],
+            chunk_index=r["chunk_index"],
+            summary=r["summary"],
+            composite_score=r["composite_score"] or 0.0,
+            pushed_to_s3_at=str(r["pushed_to_s3_at"]) if r["pushed_to_s3_at"] else None,
+            s3_key=r["s3_key"],
+            created_at=str(r["created_at"]) if r["created_at"] else None,
         )
         for r in rows
     ]

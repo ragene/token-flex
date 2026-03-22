@@ -6,24 +6,25 @@ and persists to chunk_cache.
 
 source_type options:
   "raw"         — (default) chunk the provided text directly
-  "memory_file" — ingest via ingest_memory_file (markdown sections → memory_entries + chunks)
-  "session"     — ingest via ingest_session_file (.jsonl session → memory_entries + chunks)
+  "memory_file" — ingest via ingest_memory_file
+  "session"     — ingest via ingest_session_file
 """
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 from typing import Literal, Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
+from api.auth import verify_token
 from pydantic import BaseModel
 
 from db.schema import init_db
 from engine.chunker import chunk_text
 from engine.scorer import score_chunks
 from api.push_client import push_snapshot
+from api.db_helper import get_conn, get_db_url
 
-router = APIRouter(tags=["ingest"])
+router = APIRouter(tags=["ingest"], dependencies=[Depends(verify_token)])
 
 
 class IngestRequest(BaseModel):
@@ -40,16 +41,8 @@ class IngestResponse(BaseModel):
 
 @router.post("/ingest", response_model=IngestResponse)
 async def ingest(body: IngestRequest, request: Request) -> IngestResponse:
-    """
-    Ingest text into the chunk pipeline.
+    database_url: str = get_db_url(request)
 
-    - source_type="raw" (default): chunk the text directly (text field or file at source).
-    - source_type="memory_file": ingest markdown file via memory pipeline (memory_entries + chunks).
-    - source_type="session": ingest .jsonl session file via memory pipeline (memory_entries + chunks).
-    """
-    db_path: str = request.app.state.db_path
-
-    # --- memory_file and session types go through the memory ingestor ---
     if body.source_type in ("memory_file", "session"):
         from engine.ingestor import ingest_memory_file, ingest_session_file
 
@@ -60,8 +53,7 @@ async def ingest(body: IngestRequest, request: Request) -> IngestResponse:
                 detail=f"Source file not found: {body.source}",
             )
 
-        conn = sqlite3.connect(db_path)
-        init_db(conn)
+        conn = get_conn(request)
         try:
             if body.source_type == "memory_file":
                 _entries, chunks_created = ingest_memory_file(
@@ -74,12 +66,10 @@ async def ingest(body: IngestRequest, request: Request) -> IngestResponse:
         finally:
             conn.close()
 
-        # Push updated snapshot to the token-flow-ui (best-effort)
-        push_snapshot(db_path)
-
+        push_snapshot(database_url)
         return IngestResponse(chunks_created=chunks_created, avg_composite_score=0.0)
 
-    # --- raw type: classic chunk-score-persist path ---
+    # --- raw type ---
     if body.text is not None:
         raw_text = body.text
     else:
@@ -100,16 +90,13 @@ async def ingest(body: IngestRequest, request: Request) -> IngestResponse:
     if not raw_text.strip():
         raise HTTPException(status_code=422, detail="Text content is empty.")
 
-    # Chunk
     chunks = chunk_text(raw_text)
     if not chunks:
         return IngestResponse(chunks_created=0, avg_composite_score=0.0)
 
-    # Score
     scored = score_chunks(chunks, context_hint=body.context_hint)
 
-    # Persist
-    conn = sqlite3.connect(db_path)
+    conn = get_conn(request)
     try:
         for chunk in scored:
             conn.execute(
@@ -117,7 +104,7 @@ async def ingest(body: IngestRequest, request: Request) -> IngestResponse:
                 INSERT INTO chunk_cache
                     (source_label, chunk_index, content, token_count,
                      fact_score, preference_score, intent_score, composite_score)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     body.source,
@@ -136,12 +123,10 @@ async def ingest(body: IngestRequest, request: Request) -> IngestResponse:
 
     avg = (
         sum(c.get("composite_score", 0.0) for c in scored) / len(scored)
-        if scored
-        else 0.0
+        if scored else 0.0
     )
 
-    # Push updated snapshot to the token-flow-ui (best-effort)
-    push_snapshot(db_path)
+    push_snapshot(database_url)
 
     return IngestResponse(
         chunks_created=len(scored),

@@ -23,7 +23,8 @@ import os
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Query, Request, WebSocket, WebSocketDisconnect
+from api.auth import verify_token
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -32,7 +33,7 @@ from db.pg_compat import connect as pg_connect
 from api.db_helper import get_db_url
 from api.ws_manager import ws_manager
 
-router = APIRouter(tags=["token-data"])
+router = APIRouter(tags=["token-data"], dependencies=[Depends(verify_token)])
 
 
 def _json_default(obj):

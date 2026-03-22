@@ -29,7 +29,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import sqlite3
 from datetime import datetime, timezone
 
 import boto3
@@ -47,7 +46,7 @@ def _safe_label(label: str) -> str:
     return label[:80] or "unknown"
 
 
-def push_summaries_to_s3(conn: sqlite3.Connection, bucket: str) -> int:
+def push_summaries_to_s3(conn, bucket: str) -> int:
     """
     Push all summarized-but-not-yet-pushed chunk_cache rows to S3.
 
