@@ -786,6 +786,9 @@ async def clear_token_usage(request: Request) -> dict:
 # ── Internal helper ───────────────────────────────────────────────────────────
 
 def _row_out(r) -> TokenUsageOut:
+    created = r["created_at"]
+    if created is not None and not isinstance(created, str):
+        created = created.isoformat()
     return TokenUsageOut(
         id=r["id"],
         user_email=r["user_email"],
@@ -796,5 +799,5 @@ def _row_out(r) -> TokenUsageOut:
         total_tokens=r["total_tokens"] or 0,
         cost_usd=r["cost_usd"],
         source_label=r["source_label"],
-        created_at=r["created_at"],
+        created_at=created,
     )
