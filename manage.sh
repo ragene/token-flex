@@ -28,6 +28,15 @@ case "$cmd" in
       exit 0
     fi
 
+    # Check if something else is already holding the port (stale process, no PID file)
+    _stale_pid=$(ss -tlnp 2>/dev/null | awk -v port=":${PORT}" '$4 ~ port {match($0,/pid=([0-9]+)/,a); print a[1]}')
+    if [[ -n "$_stale_pid" ]]; then
+      echo "⚠️  Port ${PORT} already in use by PID ${_stale_pid} (stale/untracked process) — killing it..."
+      kill -9 "$_stale_pid" 2>/dev/null || true
+      sleep 1
+      echo "   Cleared."
+    fi
+
     # Resolve ANTHROPIC_API_KEY — env first, then OpenClaw auth-profiles.json
     if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
       _key=$(python3 -c "
