@@ -1,7 +1,9 @@
 {
   "family": "token-flow",
   "networkMode": "awsvpc",
-  "requiresCompatibilities": ["FARGATE"],
+  "requiresCompatibilities": [
+    "FARGATE"
+  ],
   "cpu": "512",
   "memory": "1024",
   "executionRoleArn": "arn:aws:iam::531948420901:role/freightdawg-ecs-execution-role",
@@ -18,15 +20,46 @@
         }
       ],
       "environment": [
-        { "name": "TOKEN_FLOW_DB",      "value": "/tmp/token_flow.db" },
-        { "name": "S3_BUCKET",          "value": "smart-memory" },
-        { "name": "AWS_DEFAULT_REGION", "value": "us-west-2" },
-        { "name": "MEMORY_DIR",         "value": "/app/memory" },
-        { "name": "WORKSPACE",          "value": "/app" },
-        { "name": "PORT",               "value": "8001" },
-        { "name": "ECS_CLUSTER",        "value": "token-flow" },
-        { "name": "ECS_SERVICE",        "value": "token-flow" },
-        { "name": "TOKEN_FLOW_UI_URL",  "value": "https://token-flow-api.thefreightdawg.com" }
+        {
+          "name": "TOKEN_FLOW_DB",
+          "value": "/tmp/token_flow.db"
+        },
+        {
+          "name": "S3_BUCKET",
+          "value": "smart-memory"
+        },
+        {
+          "name": "AWS_DEFAULT_REGION",
+          "value": "us-west-2"
+        },
+        {
+          "name": "MEMORY_DIR",
+          "value": "/app/memory"
+        },
+        {
+          "name": "WORKSPACE",
+          "value": "/app"
+        },
+        {
+          "name": "PORT",
+          "value": "8001"
+        },
+        {
+          "name": "ECS_CLUSTER",
+          "value": "token-flow"
+        },
+        {
+          "name": "ECS_SERVICE",
+          "value": "token-flow"
+        },
+        {
+          "name": "TOKEN_FLOW_UI_URL",
+          "value": "https://token-flow-api.thefreightdawg.com"
+        },
+        {
+          "name": "SKIP_STARTUP_AUTH",
+          "value": "true"
+        }
       ],
       "secrets": [
         {
@@ -43,7 +76,10 @@
         }
       },
       "healthCheck": {
-        "command": ["CMD-SHELL", "curl -f http://localhost:8001/health || exit 1"],
+        "command": [
+          "CMD-SHELL",
+          "curl -f http://localhost:8001/health || exit 1"
+        ],
         "interval": 15,
         "timeout": 5,
         "retries": 3,

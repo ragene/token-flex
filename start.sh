@@ -5,10 +5,11 @@ set -euo pipefail
 
 # ── SSO Auth Gate ─────────────────────────────────────────────────────────────
 # Authenticate the user via Auth0 Device Flow before starting any service.
-# If a valid cached token exists it completes silently; otherwise a URL is
-# printed for the user to visit in their browser.
-echo "🔐 Authenticating with Auth0 SSO..."
-python3 - <<'PYEOF'
+# Set SKIP_STARTUP_AUTH=true to bypass (e.g. in ECS/Docker where the API
+# itself handles auth and no interactive terminal is available).
+if [[ "${SKIP_STARTUP_AUTH:-false}" != "true" ]]; then
+  echo "🔐 Authenticating with Auth0 SSO..."
+  python3 - <<'PYEOF'
 import sys, os
 sys.path.insert(0, "/app")
 try:
@@ -19,6 +20,9 @@ except Exception as e:
     print(f"❌ Authentication failed: {e}", file=sys.stderr)
     sys.exit(1)
 PYEOF
+else
+  echo "ℹ️  SKIP_STARTUP_AUTH=true — skipping SSO gate (API handles auth)"
+fi
 # ─────────────────────────────────────────────────────────────────────────────
 
 echo "🚀 Starting token-flow API on port ${PORT:-8001}..."
