@@ -29,7 +29,17 @@ case "$cmd" in
     fi
 
     # Check if something else is already holding the port (stale process, no PID file)
-    _stale_pid=$(ss -tlnp 2>/dev/null | awk -v port=":${PORT}" '$4 ~ port {match($0,/pid=([0-9]+)/,a); print a[1]}')
+    # Use /proc/net/tcp directly — works without ss/netstat
+    _stale_pid=""
+    _hex_port=$(printf '%04X' "$PORT")
+    # State 0A = LISTEN in /proc/net/tcp
+    if awk "toupper(\$2) ~ /0\\.0\\.0\\.0:${_hex_port}/ && \$4 == \"0A\" {found=1} END {exit !found}" /proc/net/tcp 2>/dev/null; then
+      # Port is in LISTEN — find which PID owns the socket inode
+      _inode=$(awk "toupper(\$2) ~ /0\\.0\\.0\\.0:${_hex_port}/ && \$4 == \"0A\" {print \$10; exit}" /proc/net/tcp 2>/dev/null)
+      if [[ -n "$_inode" ]]; then
+        _stale_pid=$(grep -rl "socket:\[${_inode}\]" /proc/*/fd 2>/dev/null | head -1 | grep -o '/proc/[0-9]*' | grep -o '[0-9]*' || true)
+      fi
+    fi
     if [[ -n "$_stale_pid" ]]; then
       echo "⚠️  Port ${PORT} already in use by PID ${_stale_pid} (stale/untracked process) — killing it..."
       kill -9 "$_stale_pid" 2>/dev/null || true
