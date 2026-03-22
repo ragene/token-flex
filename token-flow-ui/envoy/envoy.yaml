@@ -56,21 +56,47 @@ static_resources:
                             cluster: token_flow_api
                             timeout: 30s
 
-                        # Other API paths
-                        - match: { prefix: "/ingest" }
-                          route: { cluster: token_flow_api, timeout: 60s }
-                        - match: { prefix: "/chunks" }
-                          route: { cluster: token_flow_api, timeout: 30s }
-                        - match: { prefix: "/summaries" }
-                          route: { cluster: token_flow_api, timeout: 30s }
-                        - match: { prefix: "/summarize" }
-                          route: { cluster: token_flow_api, timeout: 600s }
-                        - match: { prefix: "/memory" }
-                          route: { cluster: token_flow_api, timeout: 600s }
-                        - match: { prefix: "/tokens" }
-                          route: { cluster: token_flow_api, timeout: 30s }
-                        - match: { prefix: "/session" }
-                          route: { cluster: token_flow_api, timeout: 0s }
+                        # Other API paths — all under /api/ prefix to avoid colliding with SPA routes
+                        - match: { prefix: "/api/ingest" }
+                          route:
+                            cluster: token_flow_api
+                            timeout: 60s
+                            prefix_rewrite: "/ingest"
+                        - match: { prefix: "/api/chunks" }
+                          route:
+                            cluster: token_flow_api
+                            timeout: 30s
+                            prefix_rewrite: "/chunks"
+                        - match: { prefix: "/api/summaries" }
+                          route:
+                            cluster: token_flow_api
+                            timeout: 30s
+                            prefix_rewrite: "/summaries"
+                        - match: { prefix: "/api/summarize" }
+                          route:
+                            cluster: token_flow_api
+                            timeout: 600s
+                            prefix_rewrite: "/summarize"
+                        - match: { prefix: "/api/memory" }
+                          route:
+                            cluster: token_flow_api
+                            timeout: 600s
+                            prefix_rewrite: "/memory"
+                        - match: { prefix: "/api/tokens" }
+                          route:
+                            cluster: token_flow_api
+                            timeout: 30s
+                            prefix_rewrite: "/tokens"
+                        - match: { prefix: "/api/session" }
+                          route:
+                            cluster: token_flow_api
+                            timeout: 0s
+                            prefix_rewrite: "/session"
+                        - match: { prefix: "/api/health" }
+                          route:
+                            cluster: token_flow_api
+                            timeout: 10s
+                            prefix_rewrite: "/health"
                         - match: { prefix: "/health" }
                           route: { cluster: token_flow_api, timeout: 10s }
                         # Auth0 callback must go to SPA (React handles it client-side)
@@ -79,8 +105,11 @@ static_resources:
                         # All other /auth/* routes go to the API
                         - match: { prefix: "/auth/" }
                           route: { cluster: token_flow_api, timeout: 30s }
-                        - match: { prefix: "/users" }
-                          route: { cluster: token_flow_api, timeout: 30s }
+                        - match: { prefix: "/api/users" }
+                          route:
+                            cluster: token_flow_api
+                            timeout: 30s
+                            prefix_rewrite: "/users"
 
                         # ── Static UI (SPA fallback) ──────────────────────────
                         - match: { prefix: "/" }
