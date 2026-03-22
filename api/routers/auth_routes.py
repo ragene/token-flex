@@ -78,6 +78,9 @@ def exchange_auth0_token(
 
     # Get DB connection via the standard app pattern
     conn = get_conn(request)
+    # In local/SQLite mode there's no admin approval workflow — any Auth0-validated
+    # user is automatically an active admin on the local service.
+    _is_local = getattr(request.app.state, "database_url", "").startswith("sqlite")
     try:
         # Check if user exists
         cur = conn.execute(
@@ -92,8 +95,8 @@ def exchange_auth0_token(
             count_row = count_cur.fetchone()
             total_users = count_row[0] if count_row else 0
 
-            if total_users == 0:
-                # First user ever — make them admin and activate immediately
+            if total_users == 0 or _is_local:
+                # First user ever, OR local mode — make them admin and activate immediately
                 cur = conn.execute(
                     """INSERT INTO tf_users (email, name, auth0_sub, role, is_active, last_login)
                        VALUES (%s, %s, %s, 'admin', TRUE, NOW())
@@ -101,7 +104,7 @@ def exchange_auth0_token(
                     (email, name, auth0_sub)
                 )
             else:
-                # Normal new SSO user — pending approval
+                # Normal new SSO user on remote/Postgres — pending approval
                 cur = conn.execute(
                     """INSERT INTO tf_users (email, name, auth0_sub, role, is_active, last_login)
                        VALUES (%s, %s, %s, 'viewer', FALSE, NOW())
@@ -110,15 +113,22 @@ def exchange_auth0_token(
                 )
             row = cur.fetchone()
         else:
-            conn.execute(
-                "UPDATE tf_users SET auth0_sub=%s, last_login=NOW(), name=%s WHERE email=%s",
-                (auth0_sub, name, email)
-            )
+            # In local mode, always ensure the user is active/admin (handles stale local DBs)
+            if _is_local:
+                conn.execute(
+                    "UPDATE tf_users SET auth0_sub=%s, last_login=NOW(), name=%s, is_active=TRUE, role='admin' WHERE email=%s",
+                    (auth0_sub, name, email)
+                )
+            else:
+                conn.execute(
+                    "UPDATE tf_users SET auth0_sub=%s, last_login=NOW(), name=%s WHERE email=%s",
+                    (auth0_sub, name, email)
+                )
         conn.commit()
 
         user_id = row[0]
-        role = row[1]
-        is_active = row[2]
+        role = row[1] if not _is_local else "admin"
+        is_active = True if _is_local else row[2]
     finally:
         conn.close()
 
@@ -290,6 +300,7 @@ async def device_flow_poll(request: Request):
     if not email:
         raise HTTPException(status_code=400, detail="No email in Auth0 userinfo")
 
+    _is_local = getattr(request.app.state, "database_url", "").startswith("sqlite")
     conn = get_conn(request)
     try:
         cur = conn.execute("SELECT id, role, is_active FROM tf_users WHERE email = %s", (email,))
@@ -297,8 +308,13 @@ async def device_flow_poll(request: Request):
         if row is None:
             count_row = conn.execute("SELECT COUNT(*) FROM tf_users").fetchone()
             is_first  = (count_row[0] if count_row else 0) == 0
-            role_val  = "admin" if is_first else "viewer"
-            is_active = True if is_first else False
+            # Local mode or first user — always activate as admin
+            if is_first or _is_local:
+                role_val  = "admin"
+                is_active = True
+            else:
+                role_val  = "viewer"
+                is_active = False
             cur = conn.execute(
                 """INSERT INTO tf_users (email, name, auth0_sub, role, is_active, last_login)
                    VALUES (%s, %s, %s, %s, %s, NOW())
@@ -307,14 +323,20 @@ async def device_flow_poll(request: Request):
             )
             row = cur.fetchone()
         else:
-            conn.execute(
-                "UPDATE tf_users SET auth0_sub=%s, last_login=NOW(), name=%s WHERE email=%s",
-                (auth0_sub, name, email),
-            )
+            if _is_local:
+                conn.execute(
+                    "UPDATE tf_users SET auth0_sub=%s, last_login=NOW(), name=%s, is_active=TRUE, role='admin' WHERE email=%s",
+                    (auth0_sub, name, email),
+                )
+            else:
+                conn.execute(
+                    "UPDATE tf_users SET auth0_sub=%s, last_login=NOW(), name=%s WHERE email=%s",
+                    (auth0_sub, name, email),
+                )
         conn.commit()
         user_id   = row[0]
-        role      = row[1]
-        is_active = row[2]
+        role      = row[1] if not _is_local else "admin"
+        is_active = True if _is_local else row[2]
     finally:
         conn.close()
 
