@@ -194,13 +194,19 @@ for p in ['~/.openclaw/agents/main/agent/auth-profiles.json']:
     _QUEUE_URL="${MEMORY_DISTILL_QUEUE_URL:-https://sqs.us-west-2.amazonaws.com/531948420901/freightdawg-memory-distill}"
     _API_URL="${TOKEN_FLOW_API_URL:-http://localhost:${PORT}}"
 
+    _TOKEN_FLOW_DB="${TOKEN_FLOW_DB:-/home/ec2-user/.openclaw/data/token_flow.db}"
+    _DATABASE_URL="${DATABASE_URL:-sqlite:///${_TOKEN_FLOW_DB}}"
+
     nohup env \
       ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
       WORKSPACE="${_WORKSPACE}" \
       MEMORY_DIR="${_MEMORY_DIR}" \
       MEMORY_DISTILL_QUEUE_URL="${_QUEUE_URL}" \
       TOKEN_FLOW_API_URL="${_API_URL}" \
-      python3 "${SCRIPT_DIR}/memory_distill.py" poll-sqs \
+      DATABASE_URL="${_DATABASE_URL}" \
+      SKIP_STARTUP_AUTH=true \
+      PYTHONUNBUFFERED=1 \
+      python3 -u "${SCRIPT_DIR}/memory_distill.py" poll-sqs \
         --output "${_MEMORY_DIR}/distilled.md" \
         --context-hint "FreightDawg SoCal freight dispatch app on AWS ECS" \
       >> "$POLLER_LOG_FILE" 2>&1 &
