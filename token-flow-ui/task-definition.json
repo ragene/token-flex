@@ -1,0 +1,131 @@
+{
+  "family": "token-flow-ui",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": [
+    "FARGATE"
+  ],
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::531948420901:role/freightdawg-ecs-execution-role",
+  "taskRoleArn": "arn:aws:iam::531948420901:role/freightdawg-ecs-task-role",
+  "containerDefinitions": [
+    {
+      "name": "envoy",
+      "image": "531948420901.dkr.ecr.us-west-2.amazonaws.com/token-flow-ui-envoy:latest",
+      "portMappings": [
+        {
+          "containerPort": 8080,
+          "protocol": "tcp"
+        }
+      ],
+      "essential": true,
+      "dependsOn": [
+        {
+          "containerName": "token-flow",
+          "condition": "HEALTHY"
+        },
+        {
+          "containerName": "token-flow-ui",
+          "condition": "HEALTHY"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/token-flow-ui",
+          "awslogs-region": "us-west-2",
+          "awslogs-stream-prefix": "envoy"
+        }
+      },
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "curl -f http://localhost:8080/health || exit 1"
+        ],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 60
+      }
+    },
+    {
+      "name": "token-flow",
+      "image": "531948420901.dkr.ecr.us-west-2.amazonaws.com/token-flow:latest",
+      "portMappings": [
+        {
+          "containerPort": 8001,
+          "protocol": "tcp"
+        }
+      ],
+      "essential": true,
+      "environment": [
+        { "name": "S3_BUCKET",           "value": "smart-memory" },
+        { "name": "AWS_DEFAULT_REGION",  "value": "us-west-2" },
+        { "name": "MEMORY_DIR",          "value": "/app/memory" },
+        { "name": "WORKSPACE",           "value": "/app" },
+        { "name": "PORT",                "value": "8001" },
+        { "name": "ECS_CLUSTER",         "value": "token-flow-ui" },
+        { "name": "ECS_SERVICE",         "value": "token-flow-ui" },
+        { "name": "TOKEN_FLOW_UI_URL",   "value": "https://token-flow.thefreightdawg.com" }
+      ],
+      "secrets": [
+        {
+          "name": "ANTHROPIC_API_KEY",
+          "valueFrom": "/token-flow/anthropic_api_key"
+        },
+        {
+          "name": "DATABASE_URL",
+          "valueFrom": "/token-flow/db_url"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/token-flow-ui",
+          "awslogs-region": "us-west-2",
+          "awslogs-stream-prefix": "token-flow"
+        }
+      },
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "curl -f http://localhost:8001/health || exit 1"
+        ],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 30
+      }
+    },
+    {
+      "name": "token-flow-ui",
+      "image": "531948420901.dkr.ecr.us-west-2.amazonaws.com/token-flow-ui:latest",
+      "portMappings": [
+        {
+          "containerPort": 3000,
+          "protocol": "tcp"
+        }
+      ],
+      "essential": true,
+      "environment": [],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/token-flow-ui",
+          "awslogs-region": "us-west-2",
+          "awslogs-stream-prefix": "token-flow-ui"
+        }
+      },
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "curl -f http://localhost:3000/ || exit 1"
+        ],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 15
+      }
+    }
+  ]
+}

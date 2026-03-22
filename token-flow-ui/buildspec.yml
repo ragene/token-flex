@@ -1,0 +1,83 @@
+version: 0.2
+
+# CodeBuild project: token-flow-ui-build
+# Source: github.com/ragene/token-flex (root)
+# Buildspec: token-flow-ui/buildspec.yml
+# Builds: token-flow-ui + token-flow-ui-envoy images → deploys to ECS token-flow-ui cluster
+
+env:
+  variables:
+    AWS_DEFAULT_REGION: us-west-2
+    ECS_CLUSTER: token-flow-ui
+    ECS_SERVICE: token-flow-ui
+
+phases:
+  pre_build:
+    commands:
+      - echo Logging in to Amazon ECR...
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+      - IMAGE=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/token-flow-ui
+      - ENVOY_IMAGE=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/token-flow-ui-envoy
+      - IMAGE_TAG=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c1-7)
+      - echo Ensuring log group /ecs/token-flow-ui exists...
+      - aws logs create-log-group --log-group-name /ecs/token-flow-ui --region $AWS_DEFAULT_REGION 2>/dev/null || true
+      - echo Ensuring ECS cluster token-flow-ui exists...
+      - |
+        CLUSTER_STATUS=$(aws ecs describe-clusters --clusters token-flow-ui --region $AWS_DEFAULT_REGION \
+          --query 'clusters[0].status' --output text 2>/dev/null || echo "MISSING")
+        if [ "$CLUSTER_STATUS" != "ACTIVE" ]; then
+          aws ecs create-cluster --cluster-name token-flow-ui --region $AWS_DEFAULT_REGION \
+            --capacity-providers FARGATE FARGATE_SPOT
+        fi
+      - echo Ensuring ECR repos exist...
+      - aws ecr describe-repositories --repository-names token-flow-ui --region $AWS_DEFAULT_REGION 2>/dev/null || aws ecr create-repository --repository-name token-flow-ui --region $AWS_DEFAULT_REGION
+      - aws ecr describe-repositories --repository-names token-flow-ui-envoy --region $AWS_DEFAULT_REGION 2>/dev/null || aws ecr create-repository --repository-name token-flow-ui-envoy --region $AWS_DEFAULT_REGION
+
+  build:
+    commands:
+      - echo Building token-flow-ui image...
+      - docker build
+          -f token-flow-ui/Dockerfile
+          -t $IMAGE:$IMAGE_TAG
+          -t $IMAGE:latest
+          token-flow-ui
+      - echo Building Envoy sidecar...
+      - docker build
+          -f token-flow-ui/envoy/Dockerfile.envoy
+          -t $ENVOY_IMAGE:$IMAGE_TAG
+          -t $ENVOY_IMAGE:latest
+          token-flow-ui/envoy
+
+  post_build:
+    commands:
+      - echo Pushing images...
+      - docker push $IMAGE:$IMAGE_TAG
+      - docker push $IMAGE:latest
+      - docker push $ENVOY_IMAGE:$IMAGE_TAG
+      - docker push $ENVOY_IMAGE:latest
+      - echo Registering task definition...
+      - |
+        cat token-flow-ui/task-definition.json \
+          | sed "s|531948420901|$AWS_ACCOUNT_ID|g" \
+          > /tmp/task-def-resolved.json
+        aws ecs register-task-definition \
+          --cli-input-json file:///tmp/task-def-resolved.json \
+          --region $AWS_DEFAULT_REGION
+      - echo Forcing ECS redeployment...
+      - |
+        SVC_STATUS=$(aws ecs describe-services --cluster $ECS_CLUSTER --services $ECS_SERVICE \
+          --region $AWS_DEFAULT_REGION --query 'services[0].status' --output text 2>/dev/null || echo "MISSING")
+        if [ "$SVC_STATUS" = "ACTIVE" ]; then
+          aws ecs update-service --cluster $ECS_CLUSTER --service $ECS_SERVICE \
+            --force-new-deployment --region $AWS_DEFAULT_REGION
+          echo "✅ ECS redeployment triggered"
+        else
+          echo "Service not ACTIVE ($SVC_STATUS) — skipping update-service (run deploy.sh to create)"
+        fi
+      - printf '[{"name":"token-flow-ui","imageUri":"%s"},{"name":"envoy","imageUri":"%s"}]' $IMAGE:$IMAGE_TAG $ENVOY_IMAGE:$IMAGE_TAG > imagedefinitions.json
+      - echo Done.
+
+artifacts:
+  files:
+    - imagedefinitions.json
+    - token-flow-ui/task-definition.json
