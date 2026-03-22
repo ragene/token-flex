@@ -223,6 +223,11 @@ def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict
     """
     Read current state from DB and return a snapshot dict.
     If user_email is provided, token_usage data is filtered to that user only.
+
+    Token/session/memory/pipeline data preference order:
+      1. push_cache (pushed by local service — has real local file data)
+      2. _build_tokens_and_session() fallback (reads local files, works when running locally)
+    DB tables (token_usage, chunk_cache) are always read fresh from Postgres.
     """
     c = pg_connect(database_url)
     init_db(c)
@@ -308,7 +313,24 @@ def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict
     finally:
         c.close()
 
-    tokens, session = _build_tokens_and_session(database_url, user_email=user_email)
+    # Pull tokens/session/memory/pipeline from push_cache first (has real local data).
+    # Fall back to building from local files (works when running the service locally).
+    pushed = _load_push_cache(database_url)
+    if pushed:
+        tokens          = pushed.get("tokens")  or {}
+        session         = pushed.get("session") or {}
+        # Only fall back to DB memory/pipeline rows if push didn't include them
+        if not memory_entries:
+            memory_entries  = pushed.get("memory_entries")  or memory_entries
+        if not pipeline_events:
+            pipeline_events = pushed.get("pipeline_events") or pipeline_events
+    else:
+        tokens, session = _build_tokens_and_session(database_url, user_email=user_email)
+
+    # Attach live chunk cache count to tokens dict (always from DB — most current)
+    if tokens:
+        tokens["cached_chunks"]       = len(chunks)
+        tokens["cached_chunk_tokens"] = sum(c.get("token_count") or 0 for c in chunks)
 
     return {
         "ts": datetime.utcnow().isoformat() + "Z",
@@ -455,15 +477,16 @@ async def push_snapshot(body: PushSnapshotIn, request: Request) -> dict:
     if not payload.get("ts"):
         payload["ts"] = datetime.utcnow().isoformat() + "Z"
 
-    # Persist to DB so new WS connections get real data after ECS restarts
+    # Persist to DB so new WS connections get real data after ECS restarts.
+    # Use DELETE+INSERT (works on both SQLite and PostgreSQL) instead of
+    # ON CONFLICT ... EXCLUDED which SQLite doesn't support.
     try:
         database_url: str = request.app.state.database_url
         conn = _conn(request)
         try:
+            conn.execute("DELETE FROM push_cache WHERE id = 1")
             conn.execute(
-                """INSERT INTO push_cache (id, payload, updated_at)
-                   VALUES (1, ?, NOW())
-                   ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()""",
+                "INSERT INTO push_cache (id, payload, updated_at) VALUES (1, ?, NOW())",
                 (_json.dumps(payload),),
             )
             conn.commit()
