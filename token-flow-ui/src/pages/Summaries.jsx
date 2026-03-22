@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { getSummaries } from '../api.js'
+import { getSummaries, postSummarize } from '../api.js'
 
 const ACCENT = '#e94560'
 const CARD = { background: '#16162a', borderRadius: 12, padding: 24, border: '1px solid #2a2a40' }
@@ -27,6 +27,28 @@ export default function Summaries() {
   const [expanded, setExpanded] = useState(null)
   const [source, setSource] = useState('')
   const [limit, setLimit] = useState(50)
+
+  // Summarize pipeline
+  const [sumLoading, setSumLoading] = useState(false)
+  const [sumResult, setSumResult] = useState(null)
+  const [sumError, setSumError] = useState(null)
+  const [topPct, setTopPct] = useState(0.4)
+  const [pushToS3, setPushToS3] = useState(false)
+
+  const handleSummarize = async () => {
+    setSumLoading(true)
+    setSumResult(null)
+    setSumError(null)
+    try {
+      const res = await postSummarize({ top_pct: topPct, push_to_s3: pushToS3, context_hint: '' })
+      setSumResult(res)
+      fetchSummaries()
+    } catch (e) {
+      setSumError(e.message)
+    } finally {
+      setSumLoading(false)
+    }
+  }
 
   const fetchSummaries = useCallback(async () => {
     setLoading(true)
@@ -56,6 +78,54 @@ export default function Summaries() {
         >
           ↻ Refresh
         </button>
+      </div>
+
+      {/* Run Summarizer */}
+      <div style={{ ...CARD, marginBottom: 20 }}>
+        <h2 style={{ fontSize: 15, fontWeight: 600, color: '#fff', marginBottom: 14 }}>⚙️ Run Summarizer</h2>
+        <div style={{ display: 'flex', gap: 24, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+          <div>
+            <label style={{ fontSize: 12, color: '#888', display: 'block', marginBottom: 4 }}>Top % of chunks</label>
+            <select
+              value={topPct}
+              onChange={e => setTopPct(Number(e.target.value))}
+              style={{ background: '#0f0f1a', border: '1px solid #333', color: '#e0e0e0', borderRadius: 6, padding: '6px 10px', fontSize: 13 }}
+            >
+              {[0.2, 0.4, 0.6, 0.8, 1.0].map(v => (
+                <option key={v} value={v}>{Math.round(v * 100)}%</option>
+              ))}
+            </select>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingBottom: 2 }}>
+            <input
+              type="checkbox"
+              id="pushS3"
+              checked={pushToS3}
+              onChange={e => setPushToS3(e.target.checked)}
+              style={{ accentColor: ACCENT }}
+            />
+            <label htmlFor="pushS3" style={{ fontSize: 13, color: '#ccc', cursor: 'pointer' }}>Push to S3</label>
+          </div>
+          <button
+            onClick={handleSummarize}
+            disabled={sumLoading}
+            style={{
+              background: sumLoading ? '#333' : ACCENT,
+              color: '#fff', border: 'none', borderRadius: 8,
+              padding: '8px 18px', cursor: sumLoading ? 'not-allowed' : 'pointer',
+              fontSize: 13, fontWeight: 600, opacity: sumLoading ? 0.6 : 1,
+            }}
+          >
+            {sumLoading ? 'Running...' : '▶ Run Summarize'}
+          </button>
+        </div>
+        {sumResult && (
+          <div style={{ marginTop: 10, fontSize: 13, color: '#22c55e' }}>
+            ✅ Summarized <strong>{sumResult.summarized}</strong> chunks
+            {sumResult.pushed > 0 && <>, pushed <strong>{sumResult.pushed}</strong> to S3</>}.
+          </div>
+        )}
+        {sumError && <div style={{ marginTop: 10, fontSize: 13, color: '#ef4444' }}>⚠️ {sumError}</div>}
       </div>
 
       {/* Filter bar */}
