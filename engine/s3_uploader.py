@@ -120,7 +120,7 @@ def push_summaries_to_s3(conn, bucket: str) -> int:
                 "composite": composite_score,
             },
             "token_count": token_count,
-            "created_at": created_at,
+            "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at) if created_at else None,
         }
 
         try:
