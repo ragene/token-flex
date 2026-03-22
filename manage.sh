@@ -91,12 +91,23 @@ for p in [
     _SESSIONS_DIR="${SESSIONS_DIR:-/home/ec2-user/.openclaw/agents/main/sessions}"
     _S3_BUCKET="${S3_BUCKET:-smart-memory}"
 
+    # Load .env if present (allows local overrides without editing this script)
+    if [[ -f "${SCRIPT_DIR}/.env" ]]; then
+      set -o allexport
+      source "${SCRIPT_DIR}/.env"
+      set +o allexport
+    fi
+
     _env+=(
       "TOKEN_FLOW_DB=${_TOKEN_FLOW_DB}"
       "WORKSPACE=${_WORKSPACE}"
       "MEMORY_DIR=${_MEMORY_DIR}"
       "SESSIONS_DIR=${_SESSIONS_DIR}"
       "S3_BUCKET=${_S3_BUCKET}"
+      "AUTH0_DOMAIN=${AUTH0_DOMAIN:-}"
+      "AUTH0_CLIENT_ID=${AUTH0_CLIENT_ID:-}"
+      "SECRET_KEY=${SECRET_KEY:-}"
+      "TOKEN_FLOW_UI_URL=${TOKEN_FLOW_UI_URL:-}"
     )
 
     nohup env "${_env[@]}" PYTHONUNBUFFERED=1 python3 -u "$SERVER_SCRIPT" >> "$LOG_FILE" 2>&1 &
