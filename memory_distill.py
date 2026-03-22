@@ -735,18 +735,41 @@ def poll_sqs(args_ns):
     print(f"[SQS poller] Listening on {queue_url} (region={region})")
 
     # Resolve the startup token once — reuse it for all distill calls.
-    # Always try to load a cached token even when SKIP_STARTUP_AUTH=true,
-    # so the API-based clear path (which hits the remote ECS DB) is used.
+    # Priority:
+    #   1. Cached device-flow token (if user authenticated interactively).
+    #   2. Internal HS256 service token minted from SECRET_KEY — works in
+    #      headless/ECS mode without any browser prompt.
     startup_token: Optional[str] = None
     try:
         from api.device_auth import _load_cache
         startup_token = _load_cache()
         if startup_token:
-            print(f"[SQS poller] ✅ Using cached token for distill calls")
+            print(f"[SQS poller] ✅ Using cached device-flow token for distill calls")
     except Exception:
         pass
-    if not startup_token and not _skip_auth:
-        print(f"[SQS poller] ⚠️  No cached token — distill clear will use direct DB path")
+
+    if not startup_token:
+        _secret = os.environ.get("SECRET_KEY", "")
+        if _secret:
+            try:
+                from datetime import datetime as _dt2, timedelta as _td2
+                from jose import jwt as _jwt2
+                startup_token = _jwt2.encode(
+                    {
+                        "sub":   "sqs-poller",
+                        "email": "sqs-poller@token-flow.internal",
+                        "role":  "admin",
+                        "exp":   _dt2.utcnow() + _td2(hours=4),
+                    },
+                    _secret,
+                    algorithm="HS256",
+                )
+                print(f"[SQS poller] ✅ Minted internal HS256 service token for distill calls")
+            except Exception as _e:
+                print(f"[SQS poller] ⚠️  Could not mint HS256 token: {_e}")
+
+    if not startup_token:
+        print(f"[SQS poller] ⚠️  No token available — distill clear will use direct DB path")
 
     while True:
         try:

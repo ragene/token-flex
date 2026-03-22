@@ -284,6 +284,45 @@ def log_pipeline_event(
 
 # ── Push helper ───────────────────────────────────────────────────────────────
 
+def _get_push_token() -> Optional[str]:
+    """
+    Resolve a bearer token for the /token-data/push call.
+
+    Priority order:
+      1. Cached Auth0 device-flow token (if available and not expired).
+      2. Internal HS256 JWT minted directly from SECRET_KEY — used when
+         SKIP_STARTUP_AUTH=true (e.g. ECS / headless environments) so we
+         never hang waiting for a browser prompt.
+      3. None (push goes unauthenticated — will 401 if AUTH0_DOMAIN is set).
+    """
+    # 1. Try cached device-flow token first
+    try:
+        from api.device_auth import _load_cache
+        cached = _load_cache()
+        if cached:
+            return cached
+    except Exception:
+        pass
+
+    # 2. Mint an internal HS256 service token using SECRET_KEY
+    secret = os.environ.get("SECRET_KEY", "")
+    if secret:
+        try:
+            from datetime import datetime as _dt, timedelta as _td
+            from jose import jwt as _jwt
+            payload = {
+                "sub":   "sqs-poller",
+                "email": "sqs-poller@token-flow.internal",
+                "role":  "admin",
+                "exp":   _dt.utcnow() + _td(hours=1),
+            }
+            return _jwt.encode(payload, secret, algorithm="HS256")
+        except Exception as exc:
+            log.debug("_get_push_token: HS256 mint failed: %s", exc)
+
+    return None
+
+
 def push_snapshot(
     db_path: str,
     ui_url: Optional[str] = None,
@@ -307,11 +346,11 @@ def push_snapshot(
         data = payload if payload is not None else _build_snapshot(db_path)
         body = json.dumps(data).encode()
         headers = {"Content-Type": "application/json"}
-        try:
-            from api.device_auth import get_token as _get_token
-            headers["Authorization"] = f"Bearer {_get_token()}"
-        except Exception:
-            pass   # best-effort — push without auth if device auth unavailable
+        token = _get_push_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        else:
+            log.warning("push_snapshot: no auth token available — push may be rejected (401)")
         req = urllib.request.Request(
             endpoint,
             data=body,
