@@ -218,12 +218,32 @@ def init_db(conn) -> None:
     Create all tables and indexes if they don't exist.
     Auto-detects SQLite vs PostgreSQL from the connection type.
     Idempotent — safe to call on every startup.
+
+    For PostgreSQL: each statement is executed in its own transaction so that
+    a pre-existing table (IF NOT EXISTS) does not abort the remaining statements.
     """
-    # pg_compat wraps both — detect by checking if underlying conn is sqlite3
     import sqlite3 as _sqlite3
     inner = getattr(conn, '_conn', conn)
+
     if isinstance(inner, _sqlite3.Connection):
         conn.executescript(_SCHEMA_SQL_SQLITE)
-    else:
-        conn.executescript(_SCHEMA_SQL)
-    conn.commit()
+        conn.commit()
+        return
+
+    # PostgreSQL: run each statement independently so errors don't cascade
+    from db.pg_compat import _adapt_sql
+    adapted = _adapt_sql(_SCHEMA_SQL)
+    pg_conn = inner
+    for stmt in adapted.split(';'):
+        stmt = stmt.strip()
+        if not stmt:
+            continue
+        try:
+            cur = pg_conn.cursor()
+            cur.execute(stmt)
+            pg_conn.commit()
+            cur.close()
+        except Exception as e:
+            pg_conn.rollback()
+            import logging
+            logging.getLogger(__name__).debug("init_db stmt skipped: %s | %.80s", e, stmt)
