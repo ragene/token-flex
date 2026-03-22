@@ -1,9 +1,15 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 
 const _API_BASE = import.meta.env.VITE_API_URL || ''
-const WS_URL = _API_BASE
+const _WS_BASE = _API_BASE
   ? _API_BASE.replace(/^http/, 'ws') + '/token-data/ws'
   : (window.location.protocol === 'https:' ? 'wss' : 'ws') + '://' + window.location.host + '/token-data/ws'
+
+// Attach JWT as query param — browsers can't set Authorization headers on WebSocket
+const _getWsUrl = () => {
+  const token = localStorage.getItem('tf_token')
+  return token ? `${_WS_BASE}?token=${encodeURIComponent(token)}` : _WS_BASE
+}
 
 const ACCENT = '#e94560'
 const CARD   = { background: '#16162a', borderRadius: 12, padding: 24, border: '1px solid #2a2a40' }
@@ -51,7 +57,7 @@ export default function Activity() {
   const connect = useCallback(() => {
     if (wsRef.current) { wsRef.current.onclose = null; wsRef.current.close() }
     if (retryRef.current) clearTimeout(retryRef.current)
-    const ws = new WebSocket(WS_URL)
+    const ws = new WebSocket(_getWsUrl())
     wsRef.current = ws
     ws.onopen  = () => setConnected(true)
     ws.onmessage = (e) => {
