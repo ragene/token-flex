@@ -66,13 +66,27 @@ def exchange_auth0_token(
         row = cur.fetchone()
 
         if row is None:
-            # First-time SSO user — default role: viewer
-            cur = conn.execute(
-                """INSERT INTO tf_users (email, name, auth0_sub, role, is_active, last_login)
-                   VALUES (%s, %s, %s, 'viewer', TRUE, NOW())
-                   RETURNING id, role, is_active""",
-                (email, name, auth0_sub)
-            )
+            # Check if this is the very first user — bootstrap as admin if so
+            count_cur = conn.execute("SELECT COUNT(*) FROM tf_users")
+            count_row = count_cur.fetchone()
+            total_users = count_row[0] if count_row else 0
+
+            if total_users == 0:
+                # First user ever — make them admin and activate immediately
+                cur = conn.execute(
+                    """INSERT INTO tf_users (email, name, auth0_sub, role, is_active, last_login)
+                       VALUES (%s, %s, %s, 'admin', TRUE, NOW())
+                       RETURNING id, role, is_active""",
+                    (email, name, auth0_sub)
+                )
+            else:
+                # Normal new SSO user — pending approval
+                cur = conn.execute(
+                    """INSERT INTO tf_users (email, name, auth0_sub, role, is_active, last_login)
+                       VALUES (%s, %s, %s, 'viewer', FALSE, NOW())
+                       RETURNING id, role, is_active""",
+                    (email, name, auth0_sub)
+                )
             row = cur.fetchone()
         else:
             conn.execute(
@@ -88,7 +102,7 @@ def exchange_auth0_token(
         conn.close()
 
     if not is_active:
-        raise HTTPException(status_code=403, detail="Account inactive. Contact an admin.")
+        raise HTTPException(status_code=403, detail="Your account is pending admin approval.")
 
     internal = create_access_token({
         "sub": str(user_id),

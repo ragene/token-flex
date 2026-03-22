@@ -8,12 +8,14 @@ Usage:
 from __future__ import annotations
 
 import logging
+import os
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routers import health, ingest, chunks, summaries, memory, token_data, auth_routes
+from api.routers import users as users_router
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +61,7 @@ def create_app(database_url: str) -> FastAPI:
 
     # Register routers
     app.include_router(auth_routes.router)  # /auth/config and /auth/exchange (no auth required)
+    app.include_router(users_router.router)  # /users/*
     app.include_router(health.router)
     app.include_router(ingest.router)
     app.include_router(chunks.router)
@@ -79,6 +82,27 @@ def create_app(database_url: str) -> FastAPI:
             conn.close()
         db_label = "SQLite" if database_url.startswith("sqlite") else "PostgreSQL"
         logger.info(f"token-flow DB schema initialized ({db_label})")
+
+        # Seed admin user if tf_users table is empty
+        admin_email = os.environ.get("ADMIN_EMAIL", "admin@token-flow.thefreightdawg.com")
+        conn2 = pg_connect(database_url)
+        try:
+            with conn2._conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM tf_users")
+                count = cur.fetchone()[0]
+                if count == 0:
+                    cur.execute(
+                        """INSERT INTO tf_users (email, name, role, is_active)
+                           VALUES (%s, 'Admin', 'admin', TRUE)
+                           ON CONFLICT (email) DO NOTHING""",
+                        (admin_email,)
+                    )
+                    conn2.commit()
+                    logger.info(f"Seeded admin user: {admin_email}")
+        except Exception as e:
+            logger.warning(f"Admin seed skipped (non-fatal): {e}")
+        finally:
+            conn2.close()
 
         # Background task: push snapshot (including live session data) every 30s
         async def _session_push_loop():
