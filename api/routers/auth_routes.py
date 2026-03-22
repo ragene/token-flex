@@ -342,15 +342,15 @@ async def device_flow_poll(request: Request):
 
 # ── /session/identify — no auth required (called by local service at startup) ─
 
-class _IdentifyRequest(BaseModel):
+from pydantic import BaseModel as _BaseModel
+
+class _IdentifyRequest(_BaseModel):
     email: str
     name: Optional[str] = None
     picture: Optional[str] = None
     auth0_sub: Optional[str] = None
     host: Optional[str] = None
     session_id: Optional[str] = None
-
-from pydantic import BaseModel as _BaseModel  # already imported above, alias for clarity
 
 @router.post("/session/identify", status_code=200)
 async def identify_local_session(body: _IdentifyRequest, request: Request) -> dict:
