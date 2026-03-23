@@ -40,7 +40,7 @@ def _record_token_usage_safe(
     try:
         db_url = os.environ.get("DATABASE_URL", "")
         if not db_url:
-            db_path = os.environ.get("TOKEN_FLOW_DB", "/home/ec2-user/.openclaw/data/token_flow.db")
+            db_path = os.environ.get("TOKEN_FLOW_DB", str(Path.home() / ".openclaw" / "data" / "token_flow.db"))
             db_url = f"sqlite:///{db_path}"
         from db.pg_compat import connect as pg_connect
         rates = _COST_TABLE.get(model)

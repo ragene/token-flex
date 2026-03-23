@@ -37,8 +37,17 @@ from engine.ingestor import (
 
 router = APIRouter(tags=["memory"], dependencies=[Depends(verify_token)])
 
-_DEFAULT_WORKSPACE = "/home/ec2-user/.openclaw/workspace"
-_DEFAULT_MEMORY_DIR = "/home/ec2-user/.openclaw/workspace/memory"
+
+def _openclaw_home() -> Path:
+    """Resolve the .openclaw home directory — honours OPENCLAW_HOME env override."""
+    override = os.environ.get("OPENCLAW_HOME")
+    if override:
+        return Path(override)
+    return Path.home() / ".openclaw"
+
+
+_DEFAULT_WORKSPACE = str(_openclaw_home() / "workspace")
+_DEFAULT_MEMORY_DIR = str(_openclaw_home() / "workspace" / "memory")
 
 
 def _get_conn(request: Request):
@@ -71,7 +80,7 @@ def _find_openclaw_sessions() -> list[Path]:
     """Find OpenClaw .jsonl session files from SESSIONS_DIR env."""
     sessions_dir = os.environ.get(
         "SESSIONS_DIR",
-        "/home/ec2-user/.openclaw/agents/main/sessions"
+        str(_openclaw_home() / "agents" / "main" / "sessions")
     )
     if not sessions_dir:
         return []
