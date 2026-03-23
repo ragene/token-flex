@@ -331,10 +331,16 @@ def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict
         # is set so one user never sees another's data.
         if not events and pushed.get("events"):
             cached_events = pushed["events"]
-            events = (
-                [e for e in cached_events if e.get("user_email") == user_email]
-                if user_email else cached_events
-            )
+            if user_email:
+                # Include rows explicitly tagged to this user OR rows with no
+                # user_email (unattributed — recorded by the local service which
+                # has no auth context; they belong to whoever owns the machine).
+                events = [
+                    e for e in cached_events
+                    if not e.get("user_email") or e.get("user_email") == user_email
+                ]
+            else:
+                events = cached_events
 
         if not summary_rows and pushed.get("summary"):
             if user_email:
