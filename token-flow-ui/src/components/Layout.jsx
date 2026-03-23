@@ -1,7 +1,7 @@
 import React from 'react'
 import { Outlet, NavLink, useNavigate } from 'react-router-dom'
 import { useAuth0 } from '@auth0/auth0-react'
-import { getCurrentUser } from '../api.js'
+import { useMe } from '../hooks/useMe.js'
 
 const SIDEBAR = '#1a1a2e'
 const ACCENT = '#e94560'
@@ -10,16 +10,23 @@ const domain = import.meta.env.VITE_AUTH0_DOMAIN
 const clientId = import.meta.env.VITE_AUTH0_CLIENT_ID
 const auth0Configured = !!(domain && clientId)
 
-const ALL_NAV_ITEMS = [
-  { to: '/dashboard',  label: '📊 Dashboard',  roles: null },
-  { to: '/token-data', label: '🔢 Token Data',  roles: null },
-  { to: '/memory',     label: '🧠 Memory',      roles: null },
-  { to: '/activity',   label: '⚡ Activity',    roles: null },
-  { to: '/chunks',     label: '🧩 Chunks',      roles: null },
-  { to: '/summaries',  label: '📝 Summaries',   roles: null },
-  { to: '/ingest',     label: '📥 Ingest',      roles: null },
-  { to: '/users',      label: '👥 Users',       roles: ['admin'] },
+// minRole: 'viewer' = everyone, 'admin' = admins only
+const NAV_ITEMS = [
+  { to: '/dashboard',  label: '📊 Dashboard',   minRole: 'viewer' },
+  { to: '/token-data', label: '🔢 Token Data',   minRole: 'viewer' },
+  { to: '/memory',     label: '🧠 Memory',       minRole: 'viewer' },
+  { to: '/activity',   label: '⚡ Activity',     minRole: 'viewer' },
+  { to: '/chunks',     label: '🧩 Chunks',       minRole: 'viewer' },
+  { to: '/summaries',  label: '📝 Summaries',    minRole: 'viewer' },
+  { to: '/ingest',     label: '📥 Ingest',       minRole: 'admin'  },
+  { to: '/sessions',   label: '🖥️ Sessions',     minRole: 'admin'  },
+  { to: '/users',      label: '👥 Users',        minRole: 'admin'  },
 ]
+
+const ROLE_RANK = { viewer: 0, admin: 1 }
+function canAccess(userRole, minRole) {
+  return (ROLE_RANK[userRole] ?? 0) >= (ROLE_RANK[minRole] ?? 0)
+}
 
 // Logout button — only rendered when Auth0Provider is present
 function Auth0LogoutButton() {
@@ -72,9 +79,8 @@ function LogoutButton({ onClick }) {
 }
 
 export default function Layout() {
-  const currentUser = getCurrentUser()
-  const role = currentUser?.role || 'viewer'
-  const navItems = ALL_NAV_ITEMS.filter(item => !item.roles || item.roles.includes(role))
+  const { role, name, email } = useMe()
+  const visibleNav = NAV_ITEMS.filter(({ minRole }) => canAccess(role, minRole))
 
   return (
     <div style={{ display: 'flex', minHeight: '100vh' }}>
@@ -96,8 +102,9 @@ export default function Layout() {
           </div>
           <div style={{ color: '#888', fontSize: 12, marginTop: 4 }}>Smart Memory Dashboard</div>
         </div>
+
         <div style={{ flex: 1, paddingTop: 16 }}>
-          {navItems.map(({ to, label }) => (
+          {visibleNav.map(({ to, label }) => (
             <NavLink
               key={to}
               to={to}
@@ -117,16 +124,26 @@ export default function Layout() {
             </NavLink>
           ))}
         </div>
+
         <div style={{ padding: '16px', borderTop: `1px solid ${ACCENT}22` }}>
-          {currentUser?.email && (
-            <div style={{ fontSize: 11, color: '#444', marginBottom: 8, wordBreak: 'break-all' }}>
-              {currentUser.email}
+          {/* User identity */}
+          {email && (
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 12, color: '#ccc', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {name}
+              </div>
+              <div style={{ fontSize: 10, color: '#555', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {email}
+              </div>
               <span style={{
-                display: 'inline-block', marginLeft: 6, padding: '1px 6px',
-                borderRadius: 8, fontSize: 10, fontWeight: 700,
-                background: role === 'admin' ? `${ACCENT}33` : '#2a2a40',
-                color: role === 'admin' ? ACCENT : '#666',
-              }}>{role}</span>
+                display: 'inline-block', marginTop: 4,
+                padding: '1px 7px', borderRadius: 8, fontSize: 10, fontWeight: 600,
+                background: role === 'admin' ? `${ACCENT}22` : '#1e1e38',
+                color: role === 'admin' ? ACCENT : '#555',
+                border: `1px solid ${role === 'admin' ? ACCENT + '44' : '#2a2a40'}`,
+              }}>
+                {role || 'viewer'}
+              </span>
             </div>
           )}
           {auth0Configured ? <Auth0LogoutButton /> : <PlainLogoutButton />}

@@ -1,8 +1,75 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { getSummaries, postSummarize } from '../api.js'
+import { getSummaries, getTokenSummary } from '../api.js'
 
 const ACCENT = '#e94560'
 const CARD = { background: '#16162a', borderRadius: 12, padding: 24, border: '1px solid #2a2a40' }
+
+function fmt(n) {
+  if (n == null) return '—'
+  return Number(n).toLocaleString()
+}
+
+function fmtCost(n) {
+  if (n == null) return '—'
+  return `$${Number(n).toFixed(4)}`
+}
+
+function HaikuStats({ stats }) {
+  if (!stats) return null
+  const { rows = [], grand_total_tokens, grand_total_calls, grand_cost_usd } = stats
+
+  return (
+    <div style={{ ...CARD, marginBottom: 24 }}>
+      <div style={{ fontSize: 16, fontWeight: 600, color: '#fff', marginBottom: 16 }}>🤖 Haiku Summary Stats</div>
+
+      {/* Grand totals */}
+      <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 20 }}>
+        {[
+          { label: 'Total Calls',  value: fmt(grand_total_calls),  color: '#60a5fa' },
+          { label: 'Total Tokens', value: fmt(grand_total_tokens), color: '#a78bfa' },
+          { label: 'Total Cost',   value: fmtCost(grand_cost_usd), color: '#34d399' },
+        ].map(({ label, value, color }) => (
+          <div key={label} style={{ background: '#0f0f1a', borderRadius: 8, padding: '12px 18px', border: '1px solid #2a2a40', minWidth: 140 }}>
+            <div style={{ fontSize: 11, color: '#666', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>{label}</div>
+            <div style={{ fontSize: 22, fontWeight: 700, color }}>{value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Per-operation table */}
+      {rows.length > 0 && (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <thead>
+              <tr style={{ borderBottom: '1px solid #2a2a40', color: '#666', textAlign: 'left' }}>
+                {['Operation', 'Model', 'Calls', 'Prompt', 'Completion', 'Total', 'Cost'].map(h => (
+                  <th key={h} style={{ padding: '6px 10px', fontWeight: 600, whiteSpace: 'nowrap' }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={i} style={{ borderBottom: '1px solid #1e1e30' }}>
+                  <td style={{ padding: '6px 10px', color: '#e0e0e0' }}>{r.operation || '—'}</td>
+                  <td style={{ padding: '6px 10px', color: '#a78bfa' }}>{r.model || '—'}</td>
+                  <td style={{ padding: '6px 10px', color: '#60a5fa', textAlign: 'right' }}>{fmt(r.total_calls)}</td>
+                  <td style={{ padding: '6px 10px', color: '#888', textAlign: 'right' }}>{fmt(r.prompt_tokens)}</td>
+                  <td style={{ padding: '6px 10px', color: '#888', textAlign: 'right' }}>{fmt(r.completion_tokens)}</td>
+                  <td style={{ padding: '6px 10px', color: '#a78bfa', fontWeight: 600, textAlign: 'right' }}>{fmt(r.total_tokens)}</td>
+                  <td style={{ padding: '6px 10px', color: '#34d399', textAlign: 'right' }}>{fmtCost(r.cost_usd)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {rows.length === 0 && (
+        <div style={{ color: '#444', fontSize: 13 }}>No Haiku calls recorded yet.</div>
+      )}
+    </div>
+  )
+}
 
 function scoreColor(score) {
   if (score >= 0.7) return '#22c55e'
@@ -27,34 +94,17 @@ export default function Summaries() {
   const [expanded, setExpanded] = useState(null)
   const [source, setSource] = useState('')
   const [limit, setLimit] = useState(50)
-
-  // Summarize pipeline
-  const [sumLoading, setSumLoading] = useState(false)
-  const [sumResult, setSumResult] = useState(null)
-  const [sumError, setSumError] = useState(null)
-  const [topPct, setTopPct] = useState(0.4)
-  const [pushToS3, setPushToS3] = useState(false)
-
-  const handleSummarize = async () => {
-    setSumLoading(true)
-    setSumResult(null)
-    setSumError(null)
-    try {
-      const res = await postSummarize({ top_pct: topPct, push_to_s3: pushToS3, context_hint: '' })
-      setSumResult(res)
-      fetchSummaries()
-    } catch (e) {
-      setSumError(e.message)
-    } finally {
-      setSumLoading(false)
-    }
-  }
+  const [haikuStats, setHaikuStats] = useState(null)
 
   const fetchSummaries = useCallback(async () => {
     setLoading(true)
     try {
-      const data = await getSummaries({ source, limit })
+      const [data, stats] = await Promise.all([
+        getSummaries({ source, limit }),
+        getTokenSummary().catch(() => null),
+      ])
       setSummaries(Array.isArray(data) ? data : data.summaries || [])
+      setHaikuStats(stats)
       setError(null)
     } catch (e) {
       setError(e.message)
@@ -78,54 +128,6 @@ export default function Summaries() {
         >
           ↻ Refresh
         </button>
-      </div>
-
-      {/* Run Summarizer */}
-      <div style={{ ...CARD, marginBottom: 20 }}>
-        <h2 style={{ fontSize: 15, fontWeight: 600, color: '#fff', marginBottom: 14 }}>⚙️ Run Summarizer</h2>
-        <div style={{ display: 'flex', gap: 24, alignItems: 'flex-end', flexWrap: 'wrap' }}>
-          <div>
-            <label style={{ fontSize: 12, color: '#888', display: 'block', marginBottom: 4 }}>Top % of chunks</label>
-            <select
-              value={topPct}
-              onChange={e => setTopPct(Number(e.target.value))}
-              style={{ background: '#0f0f1a', border: '1px solid #333', color: '#e0e0e0', borderRadius: 6, padding: '6px 10px', fontSize: 13 }}
-            >
-              {[0.2, 0.4, 0.6, 0.8, 1.0].map(v => (
-                <option key={v} value={v}>{Math.round(v * 100)}%</option>
-              ))}
-            </select>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingBottom: 2 }}>
-            <input
-              type="checkbox"
-              id="pushS3"
-              checked={pushToS3}
-              onChange={e => setPushToS3(e.target.checked)}
-              style={{ accentColor: ACCENT }}
-            />
-            <label htmlFor="pushS3" style={{ fontSize: 13, color: '#ccc', cursor: 'pointer' }}>Push to S3</label>
-          </div>
-          <button
-            onClick={handleSummarize}
-            disabled={sumLoading}
-            style={{
-              background: sumLoading ? '#333' : ACCENT,
-              color: '#fff', border: 'none', borderRadius: 8,
-              padding: '8px 18px', cursor: sumLoading ? 'not-allowed' : 'pointer',
-              fontSize: 13, fontWeight: 600, opacity: sumLoading ? 0.6 : 1,
-            }}
-          >
-            {sumLoading ? 'Running...' : '▶ Run Summarize'}
-          </button>
-        </div>
-        {sumResult && (
-          <div style={{ marginTop: 10, fontSize: 13, color: '#22c55e' }}>
-            ✅ Summarized <strong>{sumResult.summarized}</strong> chunks
-            {sumResult.pushed > 0 && <>, pushed <strong>{sumResult.pushed}</strong> to S3</>}.
-          </div>
-        )}
-        {sumError && <div style={{ marginTop: 10, fontSize: 13, color: '#ef4444' }}>⚠️ {sumError}</div>}
       </div>
 
       {/* Filter bar */}
@@ -165,6 +167,8 @@ export default function Summaries() {
           Apply
         </button>
       </div>
+
+      <HaikuStats stats={haikuStats} />
 
       {error && <div style={{ color: '#ef4444', marginBottom: 12 }}>⚠️ {error}</div>}
       {loading && <div style={{ color: '#555', marginBottom: 12 }}>Loading...</div>}

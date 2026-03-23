@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react'
 import StatusBadge from '../components/StatusBadge.jsx'
 import TokenMeter from '../components/TokenMeter.jsx'
 import { postDistillAndClear } from '../api.js'
+import { useMe } from '../hooks/useMe.js'
 
 const BASE_URL = import.meta.env.VITE_API_URL || ''
 const STREAM_INTERVAL = 10 // seconds between server pushes
@@ -29,6 +30,7 @@ function StatCard({ label, value, sub, color }) {
 }
 
 export default function Dashboard() {
+  const { isAdmin } = useMe()
   const [data, setData] = useState(null)
   const [session, setSession] = useState(null)
   const [error, setError] = useState(null)
@@ -54,7 +56,8 @@ export default function Dashboard() {
       try {
         const snap = JSON.parse(e.data)
         if (snap.error) { setError(snap.error); return }
-        if (snap.tokens)  setData(snap.tokens)
+        if (snap.keepalive) return
+        setData(snap.tokens || null)
         if (snap.session) setSession(snap.session)
         setLastUpdated(new Date(snap.ts))
         setError(null)
@@ -118,12 +121,14 @@ export default function Dashboard() {
                      borderRadius: 8, padding: '6px 14px', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
             ↻ Refresh
           </button>
-          <button onClick={handleDistill} disabled={distilling}
-            style={{ background: distilling ? '#3a1a2a' : '#4a0020', color: distilling ? '#888' : '#f87171',
-                     border: '1px solid #7f1d1d', borderRadius: 8, padding: '6px 14px',
-                     cursor: distilling ? 'not-allowed' : 'pointer', fontSize: 13, fontWeight: 600 }}>
-            {distilling ? '⏳ Distilling…' : '🧹 Distill & Clear'}
-          </button>
+          {isAdmin && (
+            <button onClick={handleDistill} disabled={distilling}
+              style={{ background: distilling ? '#3a1a2a' : '#4a0020', color: distilling ? '#888' : '#f87171',
+                       border: '1px solid #7f1d1d', borderRadius: 8, padding: '6px 14px',
+                       cursor: distilling ? 'not-allowed' : 'pointer', fontSize: 13, fontWeight: 600 }}>
+              {distilling ? '⏳ Distilling…' : '🧹 Distill & Clear'}
+            </button>
+          )}
         </div>
       </div>
 
@@ -239,8 +244,14 @@ export default function Dashboard() {
         </>
       )}
 
-      {!data && !error && (
+      {!lastUpdated && !error && (
         <div style={{ color: '#555', textAlign: 'center', paddingTop: 80, fontSize: 16 }}>Loading...</div>
+      )}
+
+      {lastUpdated && !data && (
+        <div style={{ ...CARD, color: '#666', textAlign: 'center', padding: 40 }}>
+          No local session data — this view is only available on the host machine.
+        </div>
       )}
     </div>
   )

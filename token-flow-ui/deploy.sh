@@ -65,10 +65,10 @@ if [[ "$1" != "--skip-build" ]]; then
   SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
   WORKSPACE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-  echo "  → token-flow API (from $WORKSPACE_DIR)"
-  docker build -f "$WORKSPACE_DIR/Dockerfile" \
+  echo "  → token-flow API (from $WORKSPACE_DIR/token-flow)"
+  docker build -f "$WORKSPACE_DIR/token-flow/Dockerfile" \
     -t "$ECR/token-flow:latest" \
-    "$WORKSPACE_DIR" 2>&1 | tail -5
+    "$WORKSPACE_DIR/token-flow" 2>&1 | tail -5
   docker push "$ECR/token-flow:latest" 2>&1 | tail -3
   echo "  ✓ token-flow API image pushed"
 
