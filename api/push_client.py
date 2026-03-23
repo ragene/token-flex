@@ -191,6 +191,66 @@ def _build_token_data() -> dict:
 
 # ── Snapshot builder ──────────────────────────────────────────────────────────
 
+def _extract_session_usage(owner_email: Optional[str] = None) -> list:
+    """
+    Parse token usage records from the active OpenClaw session JSONL file.
+    Returns a list of event dicts compatible with the token_usage schema.
+    """
+    from pathlib import Path as _Path
+    sessions_dir = _Path(
+        os.environ.get("SESSIONS_DIR") or
+        os.path.expanduser("~/.openclaw/agents/main/sessions")
+    )
+    events = []
+    try:
+        sj = sessions_dir / "sessions.json"
+        if not sj.exists():
+            return events
+        meta = json.loads(sj.read_text(errors="ignore"))
+        # Process all sessions, not just main — include idle sessions too
+        for key, sm in meta.items():
+            sid = sm.get("sessionId")
+            if not sid:
+                continue
+            sf = sessions_dir / f"{sid}.jsonl"
+            if not sf.exists():
+                continue
+            current_model = None
+            with open(sf, errors="ignore") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    # Track current model
+                    if obj.get("type") == "model_change":
+                        current_model = obj.get("modelId")
+                    # Extract usage from assistant messages
+                    if obj.get("type") == "message":
+                        msg = obj.get("message") or {}
+                        usage = msg.get("usage")
+                        if usage and msg.get("role") == "assistant":
+                            cost = (usage.get("cost") or {}).get("total")
+                            events.append({
+                                "user_email":         owner_email or "",
+                                "operation":          "chat",
+                                "model":              current_model,
+                                "prompt_tokens":      (usage.get("input") or 0) +
+                                                      (usage.get("cacheRead") or 0) +
+                                                      (usage.get("cacheWrite") or 0),
+                                "completion_tokens":  usage.get("output") or 0,
+                                "total_tokens":       usage.get("totalTokens") or 0,
+                                "cost_usd":           cost,
+                                "source_label":       f"session:{sid[:8]}",
+                                "created_at":         obj.get("timestamp"),
+                            })
+    except Exception as exc:
+        log.debug("_extract_session_usage failed (non-fatal): %s", exc)
+    return events
+
+
 def _build_snapshot(db_path: str) -> dict:
     """Read current state from DB and return a full snapshot dict."""
     from db.schema import init_db
@@ -239,6 +299,31 @@ def _build_snapshot(db_path: str) -> dict:
             LIMIT 100
         """).fetchall()
         events = [dict(r) for r in event_rows]
+
+        # If DB has no token_usage rows (local-only deployment), extract usage
+        # directly from the OpenClaw session JSONL files so the dashboard shows
+        # real AI cost/token data even without a Postgres token_usage table.
+        if not events:
+            owner_email = _get_owner_email()
+            session_events = _extract_session_usage(owner_email=owner_email)
+            if session_events:
+                events = session_events[-100:]  # latest 100
+                # Recompute summary from session events
+                from collections import defaultdict as _dd
+                agg: dict = _dd(lambda: {"total_calls": 0, "prompt_tokens": 0,
+                                          "completion_tokens": 0, "total_tokens": 0,
+                                          "cost_usd": 0.0})
+                for e in session_events:
+                    key = (e.get("operation", ""), e.get("model", ""))
+                    agg[key]["total_calls"]       += 1
+                    agg[key]["prompt_tokens"]     += e.get("prompt_tokens") or 0
+                    agg[key]["completion_tokens"] += e.get("completion_tokens") or 0
+                    agg[key]["total_tokens"]      += e.get("total_tokens") or 0
+                    agg[key]["cost_usd"]          += e.get("cost_usd") or 0.0
+                summary_rows = [{"operation": k[0], "model": k[1], **v} for k, v in agg.items()]
+                grand_tokens = sum(r["total_tokens"] for r in summary_rows)
+                grand_calls  = sum(r["total_calls"]  for r in summary_rows)
+                grand_cost   = round(sum(r["cost_usd"] for r in summary_rows), 6)
 
         # Latest 50 memory entries
         try:
