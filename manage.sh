@@ -143,6 +143,7 @@ case "$cmd" in
       "AUTH0_CLIENT_ID=${AUTH0_CLIENT_ID:-}"
       "SECRET_KEY=${SECRET_KEY:-}"
       "TOKEN_FLOW_UI_URL=${TOKEN_FLOW_UI_URL:-}"
+      "TOKEN_FLOW_AUTH_TOKEN=${TOKEN_FLOW_AUTH_TOKEN:-}"
     )
 
     nohup env "${_env[@]}" PYTHONUNBUFFERED=1 python3 -u "$SERVER_SCRIPT" >> "$LOG_FILE" 2>&1 &

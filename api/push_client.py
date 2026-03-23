@@ -317,17 +317,24 @@ def _get_push_token() -> Optional[str]:
     Resolve a bearer token for the /token-data/push call.
 
     Priority order:
-      1. TOKEN_FLOW_JWT env var — pre-minted by manage.sh start-poller so
-         the poller never needs interactive device-flow.
-      2. Cached Auth0 device-flow token (interactive sessions / local dev).
-      3. None — push goes unauthenticated; will 401 if AUTH0_DOMAIN is set.
+      1. TOKEN_FLOW_AUTH_TOKEN env var — shared static token accepted by
+         verify_token as a service-account credential.  Always preferred for
+         push/record calls so the local service never needs a user JWT.
+      2. TOKEN_FLOW_JWT env var — pre-minted by manage.sh start-poller.
+      3. Cached Auth0 device-flow token (interactive sessions / local dev).
+      4. None — push goes unauthenticated; will 401 if AUTH0_DOMAIN is set.
     """
-    # 1. Pre-minted JWT passed in by manage.sh (headless / ECS path)
+    # 1. Shared static service token — preferred for push calls
+    static_token = os.environ.get("TOKEN_FLOW_AUTH_TOKEN", "").strip()
+    if static_token:
+        return static_token
+
+    # 2. Pre-minted JWT passed in by manage.sh (headless / ECS path)
     jwt_env = os.environ.get("TOKEN_FLOW_JWT", "").strip()
     if jwt_env:
         return jwt_env
 
-    # 2. Cached device-flow token (interactive local dev)
+    # 3. Cached device-flow token (interactive local dev)
     try:
         from api.device_auth import _load_cache
         cached = _load_cache()
