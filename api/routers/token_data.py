@@ -848,8 +848,17 @@ async def trigger_distill(request: Request, token_payload: Optional[dict] = Depe
     # triggered_by falls back to the JWT email so attribution is always accurate
     triggered_by = (body.get("triggered_by") or user_email or "unknown").strip()
 
-    # Scoped users can only clear their own token_usage rows — not the owner's memory.
-    action = "distill_and_clear" if not user_email else "clear_tokens_only"
+    # Machine owner gets full distill_and_clear (rewrites memory on disk).
+    # Remote viewers only get clear_tokens_only (never touches owner's files).
+    # Owner = push_cache.owner_email matches the requesting user's email.
+    _is_owner = False
+    try:
+        pushed = _load_push_cache(request.app.state.database_url)
+        _owner_email = (pushed.get("owner_email") or "").strip() if pushed else ""
+        _is_owner = (not user_email) or (bool(_owner_email) and user_email == _owner_email)
+    except Exception:
+        pass
+    action = "distill_and_clear" if _is_owner else "clear_tokens_only"
 
     try:
         import boto3

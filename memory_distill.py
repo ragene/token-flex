@@ -855,29 +855,23 @@ def poll_sqs(args_ns):
                 continue
 
             if action == "distill_and_clear":
-                # Full distill + token clear — only safe when triggered by the machine owner
-                # (msg_user_email is None/empty for admin/unauthenticated requests).
-                # Scoped users send "clear_tokens_only" instead; if somehow a
-                # distill_and_clear arrives with a non-empty user_email it means it
-                # was sent by an older client — treat it as clear_tokens_only to be safe.
-                if msg_user_email:
-                    print(f"[SQS poller] ⚠️  distill_and_clear received with user_email={msg_user_email} — "
-                          f"downgrading to clear_tokens_only to protect owner memory files")
-                    action = "clear_tokens_only"
-                else:
-                    print(f"[SQS poller] Starting distill+clear (triggered by {triggered_by}, scope=all)...")
-                    try:
-                        run_distill_and_clear(args_ns, triggered_by=triggered_by,
-                                              auth_token=startup_token,
-                                              user_email=None)
-                        print("[SQS poller] ✅ distill+clear complete")
-                    except Exception as e:
-                        print(f"[SQS poller] ⚠️  distill+clear failed: {e}")
+                # Full distill + token clear — server already verified the requester
+                # is the machine owner before sending this action.
+                print(f"[SQS poller] Starting distill+clear (triggered by {triggered_by})...")
+                try:
+                    run_distill_and_clear(args_ns, triggered_by=triggered_by,
+                                          auth_token=startup_token,
+                                          user_email=msg_user_email or None)
+                    print("[SQS poller] ✅ distill+clear complete")
+                except Exception as e:
+                    print(f"[SQS poller] ⚠️  distill+clear failed: {e}")
 
             if action == "clear_tokens_only":
-                # Scoped user clear: wipe only their token_usage rows, skip memory distill.
-                print(f"[SQS poller] Clearing token_usage rows for user_email={msg_user_email or 'all'} (no memory distill)...")
+                # Clear token_usage rows and update cleared_at on remote push_cache.
+                # This covers both DB rows and JSONL-sourced events (via cleared_at).
+                print(f"[SQS poller] Clearing tokens for user_email={msg_user_email or 'all'}...")
                 try:
+                    # 1. Clear local SQLite token_usage rows
                     import sqlite3 as _sqlite3
                     _local_db = str(getattr(args_ns, 'db', None) or
                                     os.environ.get("TOKEN_FLOW_DB",
@@ -894,9 +888,29 @@ def poll_sqs(args_ns):
                         _conn.execute("DELETE FROM token_usage")
                     _conn.commit()
                     _conn.close()
-                    print(f"[SQS poller] ✅ Deleted {_count} token_usage rows (scope={msg_user_email or 'all'})")
+                    print(f"[SQS poller] ✅ Deleted {_count} local SQLite rows (scope={msg_user_email or 'all'})")
                 except Exception as e:
-                    print(f"[SQS poller] ⚠️  clear_tokens_only failed: {e}")
+                    print(f"[SQS poller] ⚠️  local SQLite clear failed: {e}")
+
+                try:
+                    # 2. Call remote /token-data/clear to update push_cache cleared_at
+                    import urllib.request as _ureq2, json as _j2
+                    _remote_url2 = os.environ.get("TOKEN_FLOW_UI_URL", "").rstrip("/")
+                    if _remote_url2 and startup_token:
+                        _body2 = _j2.dumps({"scoped_user_email": msg_user_email} if msg_user_email else {}).encode()
+                        _req2 = _ureq2.Request(
+                            f"{_remote_url2}/token-data/clear",
+                            data=_body2,
+                            method="DELETE",
+                            headers={"Authorization": f"Bearer {startup_token}",
+                                     "Content-Type": "application/json"},
+                        )
+                        with _ureq2.urlopen(_req2, timeout=10) as _r2:
+                            print(f"[SQS poller] ✅ Remote push_cache cleared_at updated: {_r2.read().decode()[:80]}")
+                    else:
+                        print("[SQS poller] ⚠️  Skipping remote clear (no TOKEN_FLOW_UI_URL or auth token)")
+                except Exception as e:
+                    print(f"[SQS poller] ⚠️  Remote clear_at update failed: {e}")
 
             sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt)
 
