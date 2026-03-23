@@ -321,16 +321,49 @@ def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict
         session         = pushed.get("session") or {}
         # token_usage lives in local SQLite (not Postgres), so the DB queries above
         # return empty rows.  When the DB has no data, pull summary/events from the
-        # push_cache snapshot sent by the local service so connecting/reconnecting
-        # clients see the same data as clients that received the live broadcast.
-        if not summary_rows and pushed.get("summary"):
-            pushed_summary = pushed["summary"]
-            summary_rows   = pushed_summary.get("rows", summary_rows)
-            grand_tokens   = pushed_summary.get("grand_total_tokens", grand_tokens)
-            grand_calls    = pushed_summary.get("grand_total_calls",  grand_calls)
-            grand_cost     = pushed_summary.get("grand_cost_usd",     grand_cost)
+        # push_cache snapshot sent by the local service — but only when no user filter
+        # is active (i.e. admin/unauthenticated view).  For authenticated users we
+        # never fall back to the unscoped push_cache summary/events because that would
+        # leak other users' data into a user-scoped session.
+        # token_usage lives in local SQLite (not Postgres), so DB queries above
+        # return empty when using a remote Postgres deployment.  Fall back to
+        # push_cache data, but filter it to the requesting user when user_email
+        # is set so one user never sees another's data.
         if not events and pushed.get("events"):
-            events = pushed["events"]
+            cached_events = pushed["events"]
+            events = (
+                [e for e in cached_events if e.get("user_email") == user_email]
+                if user_email else cached_events
+            )
+
+        if not summary_rows and pushed.get("summary"):
+            if user_email:
+                # Recompute summary totals from the already-filtered events list
+                # so the summary card reflects only this user's usage.
+                from collections import defaultdict
+                agg: dict = defaultdict(lambda: {"total_calls": 0, "prompt_tokens": 0,
+                                                  "completion_tokens": 0, "total_tokens": 0,
+                                                  "cost_usd": 0.0})
+                for e in events:
+                    key = (e.get("operation", ""), e.get("model", ""))
+                    agg[key]["total_calls"]        += 1
+                    agg[key]["prompt_tokens"]      += e.get("prompt_tokens") or 0
+                    agg[key]["completion_tokens"]  += e.get("completion_tokens") or 0
+                    agg[key]["total_tokens"]       += e.get("total_tokens") or 0
+                    agg[key]["cost_usd"]           += e.get("cost_usd") or 0.0
+                summary_rows = [
+                    {"operation": k[0], "model": k[1], **v} for k, v in agg.items()
+                ]
+                grand_tokens = sum(r["total_tokens"] for r in summary_rows)
+                grand_calls  = sum(r["total_calls"]  for r in summary_rows)
+                grand_cost   = round(sum(r["cost_usd"] for r in summary_rows), 6)
+            else:
+                # No user filter — serve the full unscoped push_cache summary (admin view)
+                pushed_summary = pushed["summary"]
+                summary_rows   = pushed_summary.get("rows", summary_rows)
+                grand_tokens   = pushed_summary.get("grand_total_tokens", grand_tokens)
+                grand_calls    = pushed_summary.get("grand_total_calls",  grand_calls)
+                grand_cost     = pushed_summary.get("grand_cost_usd",     grand_cost)
         # Only fall back to DB memory/pipeline rows if push didn't include them
         if not memory_entries:
             memory_entries  = pushed.get("memory_entries")  or memory_entries
