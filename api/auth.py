@@ -29,11 +29,19 @@ def decode_token(token: str) -> dict:
         raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
 
 
+_SHARED_TOKEN = os.environ.get("TOKEN_FLOW_AUTH_TOKEN", "")
+
+
 def verify_token(credentials: HTTPAuthorizationCredentials = Security(security)) -> Optional[dict]:
     """
-    Verify internal HS256 JWT. If AUTH0_DOMAIN is not set, auth is disabled (pass-through).
-    Returns decoded token payload or None if auth disabled.
-    Raises 401 if token is invalid.
+    Verify bearer token. Accepts two forms:
+      1. Shared static TOKEN_FLOW_AUTH_TOKEN — used by the local service for
+         push/record calls. Returns None (no user identity, treated as service account).
+      2. Internal HS256 JWT (minted by /auth/exchange) — used by browser clients.
+         Returns the decoded payload containing 'email', 'role', etc.
+
+    If AUTH0_DOMAIN is not set, all requests pass through (dev mode).
+    Raises 401 if the token is present but invalid.
     """
     if not AUTH0_DOMAIN:
         return None  # dev mode passthrough
@@ -41,7 +49,14 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Security(security))
     if not credentials:
         raise HTTPException(status_code=401, detail="Authorization required")
 
-    return decode_token(credentials.credentials)
+    raw = credentials.credentials
+
+    # Accept shared static token (local service / poller) — no user context
+    if _SHARED_TOKEN and raw == _SHARED_TOKEN:
+        return None
+
+    # Otherwise expect a signed internal JWT
+    return decode_token(raw)
 
 
 def get_current_user_email(token_payload: Optional[dict]) -> Optional[str]:
