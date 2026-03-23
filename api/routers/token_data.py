@@ -338,11 +338,26 @@ def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict
         # call in the else branch (when there is no push_cache).
         session = {"session_id": None, "token_count_approx": 0, "message_count": 0}
 
-        # push_cache tokens reflect the LOCAL machine owner's session files
-        # (~/.openclaw/agents/main/sessions/).  A scoped (non-owner) user must
-        # never see those numbers.  Return None so the UI hides the section.
+        # push_cache tokens reflect the LOCAL machine owner's session files.
+        # Show them to: (a) unauthenticated/admin (no user_email), or
+        # (b) the machine owner — identified by having a row in local_sessions.
+        # Remote viewers (authenticated but not the owner) get None so the UI
+        # hides the "No local session data" section rather than showing stale owner data.
         _pushed_tokens = pushed.get("tokens") or {}
-        tokens = None if user_email else _pushed_tokens
+        _is_owner = False
+        if user_email:
+            try:
+                _c = pg_connect(database_url)
+                init_db(_c)
+                _owner_row = _c.execute(
+                    "SELECT 1 FROM local_sessions WHERE email = %s LIMIT 1",
+                    (user_email,)
+                ).fetchone()
+                _c.close()
+                _is_owner = _owner_row is not None
+            except Exception:
+                pass
+        tokens = _pushed_tokens if (not user_email or _is_owner) else None
         # token_usage lives in local SQLite (not Postgres), so the DB queries above
         # return empty rows.  When the DB has no data, pull summary/events from the
         # push_cache snapshot sent by the local service — but only when no user filter
@@ -408,7 +423,27 @@ def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict
         if not chunks and pushed.get("chunks"):
             chunks = pushed["chunks"]
     else:
-        tokens, session = _build_tokens_and_session(database_url, user_email=user_email)
+        # No push_cache — build from local files (works when running locally).
+        # Check if this user is the machine owner before showing local session data.
+        _is_owner_fallback = False
+        if user_email:
+            try:
+                _c2 = pg_connect(database_url)
+                init_db(_c2)
+                _owner_row2 = _c2.execute(
+                    "SELECT 1 FROM local_sessions WHERE email = %s LIMIT 1",
+                    (user_email,)
+                ).fetchone()
+                _c2.close()
+                _is_owner_fallback = _owner_row2 is not None
+            except Exception:
+                pass
+        if not user_email or _is_owner_fallback:
+            tokens, session = _build_tokens_and_session(database_url, user_email=user_email)
+        else:
+            # Remote viewer with no push_cache available — return empty tokens/session
+            tokens = None
+            session = {"session_id": None, "token_count_approx": 0, "message_count": 0}
 
     # Attach live chunk cache count to tokens dict (always from DB — most current)
     if tokens:
