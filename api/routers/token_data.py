@@ -779,6 +779,58 @@ async def get_cleared_at(request: Request, token_payload: Optional[dict] = Depen
     return {"cleared_at": ts, "user_email": user_email}
 
 
+@router.post("/token-data/clear-timestamp", status_code=200)
+async def set_cleared_at(request: Request, token_payload: Optional[dict] = Depends(verify_token)) -> dict:
+    """
+    Set cleared_at timestamp in push_cache for the requesting user.
+    Called by the local poller after distill+clear completes so JSONL-sourced
+    events before this timestamp are excluded from future push snapshots.
+    """
+    user_email = get_current_user_email(token_payload)
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    scoped_email = (body.get("scoped_user_email") or "").strip() or user_email
+
+    database_url: str = request.app.state.database_url
+    _now = datetime.utcnow().isoformat() + "Z"
+
+    try:
+        cached = _load_push_cache(database_url)
+        if not cached:
+            cached = {"ts": _now, "events": [], "summary": {"rows": [], "grand_total_tokens": 0,
+                      "grand_total_calls": 0, "grand_cost_usd": 0.0}}
+        cleared_map = cached.get("cleared_at") or {}
+        if scoped_email:
+            cleared_map[scoped_email] = _now
+        else:
+            cleared_map["__all__"] = _now
+        cached["cleared_at"] = cleared_map
+        # Also wipe events for this user from push_cache
+        cached["events"] = [e for e in (cached.get("events") or [])
+                            if e.get("user_email") != scoped_email] if scoped_email \
+                           else []
+        cached["ts"] = _now
+        conn2 = _conn(request)
+        try:
+            conn2.execute(
+                """INSERT INTO push_cache (id, payload, updated_at) VALUES (1, %s, NOW())
+                   ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()""",
+                (_json.dumps(cached),)
+            )
+            conn2.commit()
+        finally:
+            conn2.close()
+    except Exception as exc:
+        log.warning("set_cleared_at failed: %s", exc)
+
+    await ws_manager.notify(lambda email: _build_snapshot(database_url, user_email=email),
+                            require_email=bool(AUTH0_DOMAIN))
+    return {"status": "ok", "cleared_at": _now, "user_email": scoped_email}
+
+
 # ── Export endpoint ───────────────────────────────────────────────────────────
 
 @router.get("/token-data/export")

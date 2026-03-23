@@ -606,79 +606,23 @@ def run_distill_and_clear(args_ns, triggered_by: str = "unknown", auth_token: st
     except Exception as e:
         print(f"  ⚠️  Local SQLite clear failed: {e}")
 
-    # ── 4b. Also clear remote ECS Postgres via API (best-effort) ─────────────
-    # The API /token-data/clear endpoint is now JWT-scoped, so passing the
-    # auth_token is sufficient — the server will scope the DELETE to that user.
+    # ── 4b. Update cleared_at on remote push_cache so JSONL events stay cleared ─
+    # (token_usage table is already cleared above; session JSONL events are
+    #  filtered by cleared_at on the next push cycle)
     _remote_url = os.environ.get("TOKEN_FLOW_UI_URL", "").rstrip("/")
-    api_url = _remote_url or os.environ.get("TOKEN_FLOW_API_URL", "http://localhost:8001")
-    _cleared_via_api = False
-
-    if auth_token:
+    if _remote_url and auth_token:
         try:
-            import urllib.request as _ureq
-            import json as _json_inner
-            print("  🔐 Clearing remote token_usage via API (pre-acquired token)...")
-            # Pass scoped_user_email in the body so the server clears only the
-            # triggering user's rows even when auth_token belongs to a service account.
-            _clear_body = _json_inner.dumps(
-                {"scoped_user_email": user_email} if user_email else {}
-            ).encode()
-            req = _ureq.Request(
-                f"{api_url}/token-data/clear",
-                data=_clear_body,
-                method="DELETE",
-                headers={
-                    "Authorization": f"Bearer {auth_token}",
-                    "Content-Type": "application/json",
-                },
+            import urllib.request as _ureq, json as _jc
+            _body = _jc.dumps({"scoped_user_email": user_email} if user_email else {}).encode()
+            _req = _ureq.Request(
+                f"{_remote_url}/token-data/clear-timestamp",
+                data=_body, method="POST",
+                headers={"Authorization": f"Bearer {auth_token}", "Content-Type": "application/json"},
             )
-            with _ureq.urlopen(req, timeout=10) as r:
-                body = r.read().decode()
-                print(f"  ✅ Remote token_usage cleared via API: {body}")
-            _cleared_via_api = True
+            with _ureq.urlopen(_req, timeout=10) as _r:
+                print(f"  ✅ Remote cleared_at updated: {_r.read().decode()[:80]}")
         except Exception as e:
-            print(f"  ⚠️  Remote API clear failed ({e}) — local SQLite already cleared above")
-
-    if not _cleared_via_api:
-        _skip_auth = os.environ.get("SKIP_STARTUP_AUTH", "").lower() in ("1", "true", "yes")
-        db_url = os.environ.get("DATABASE_URL", "")
-
-        if db_url and db_url.startswith("postgresql"):
-            # Direct Postgres clear — scoped to user_email when provided
-            print("  🗄️  Clearing remote token_usage directly via DATABASE_URL...")
-            try:
-                import psycopg2
-                conn_str = db_url.replace("postgresql+psycopg2://", "postgresql://")
-                conn_db = psycopg2.connect(conn_str)
-                cur = conn_db.cursor()
-                cur.execute(f"SELECT COUNT(*) FROM token_usage {_email_filter}", _email_params)
-                count = cur.fetchone()[0]
-                cur.execute(f"DELETE FROM token_usage {_email_filter}", _email_params)
-                conn_db.commit()
-                cur.close()
-                conn_db.close()
-                print(f"  ✅ Deleted {count} remote token_usage rows from Postgres (scope={user_email or 'all'})")
-            except Exception as e:
-                print(f"  ⚠️  Direct Postgres clear failed: {e}")
-        elif not _skip_auth:
-            # Last resort: device flow auth + API call (server will scope via JWT)
-            try:
-                import urllib.request
-                from api.device_auth import get_auth_headers
-                print("  🔐 Authenticating with token-flow (SSO fallback)...")
-                auth_headers = get_auth_headers()
-                req = urllib.request.Request(
-                    f"{api_url}/token-data/clear",
-                    method="DELETE",
-                    headers=auth_headers,
-                )
-                with urllib.request.urlopen(req, timeout=10) as r:
-                    body = r.read().decode()
-                    print(f"  ✅ token_usage cleared via API (SSO): {body}")
-            except Exception as e:
-                print(f"  ⚠️  Could not clear remote token_usage via API: {e}")
-        else:
-            print("  ℹ️  No remote DATABASE_URL / JWT — only local SQLite was cleared")
+            print(f"  ⚠️  cleared_at update failed (non-fatal): {e}")
 
     # ── 5. Log distill event to pipeline_events ───────────────────────────────
     try:
