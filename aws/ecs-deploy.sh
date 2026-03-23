@@ -57,9 +57,10 @@ if [[ ! -f "$ENV_FILE" ]]; then
 fi
 
 # Source only the vars we need (avoid polluting the shell with everything)
-_AUTH0_DOMAIN=$(grep   '^AUTH0_DOMAIN='   "$ENV_FILE" | cut -d= -f2-)
-_AUTH0_CLIENT=$(grep   '^AUTH0_CLIENT_ID=' "$ENV_FILE" | cut -d= -f2-)
-_SECRET_KEY=$(grep     '^SECRET_KEY='     "$ENV_FILE" | cut -d= -f2-)
+_AUTH0_DOMAIN=$(grep   '^AUTH0_DOMAIN='          "$ENV_FILE" | cut -d= -f2-)
+_AUTH0_CLIENT=$(grep   '^AUTH0_CLIENT_ID='       "$ENV_FILE" | cut -d= -f2-)
+_SECRET_KEY=$(grep     '^SECRET_KEY='            "$ENV_FILE" | cut -d= -f2-)
+_SHARED_TOKEN=$(grep   '^TOKEN_FLOW_AUTH_TOKEN=' "$ENV_FILE" | cut -d= -f2-)
 
 if [[ -z "$_AUTH0_DOMAIN" || -z "$_SECRET_KEY" ]]; then
   echo "❌ AUTH0_DOMAIN or SECRET_KEY missing from .env"
@@ -85,9 +86,10 @@ with open("$_TD_FILE") as f:
     td = json.load(f)
 
 patches = {
-    "AUTH0_DOMAIN":    "$_AUTH0_DOMAIN",
-    "AUTH0_CLIENT_ID": "$_AUTH0_CLIENT",
-    "SECRET_KEY":      "$_SECRET_KEY",
+    "AUTH0_DOMAIN":          "$_AUTH0_DOMAIN",
+    "AUTH0_CLIENT_ID":       "$_AUTH0_CLIENT",
+    "SECRET_KEY":            "$_SECRET_KEY",
+    "TOKEN_FLOW_AUTH_TOKEN": "$_SHARED_TOKEN",
 }
 
 for c in td["containerDefinitions"]:

@@ -110,15 +110,58 @@ def _row_to_chunk(row) -> ChunkOut:
     )
 
 
+def _load_push_cache(request: Request) -> dict | None:
+    """Return the last push_cache snapshot, or None."""
+    try:
+        from api.db_helper import get_conn as _gc
+        conn = _gc(request)
+        try:
+            row = conn.execute("SELECT payload FROM push_cache WHERE id = 1").fetchone()
+            if row:
+                return _json.loads(row[0])
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return None
+
+
 @router.get("/tokens", response_model=TokenStats)
 async def token_stats(request: Request) -> TokenStats:
     WARN_THRESHOLD    = int(os.environ.get("SMART_MEMORY_WARN_TOKENS",   "30000"))
     DISTILL_THRESHOLD = int(os.environ.get("SMART_MEMORY_DISTILL_TOKENS", "30000"))
 
+    # Prefer push_cache — the local service has the real file data.
+    # Only fall back to local file reads when push_cache is empty (running locally).
+    pushed = _load_push_cache(request)
+    if pushed and pushed.get("tokens"):
+        t = pushed["tokens"]
+        conn = get_conn(request)
+        try:
+            crow = conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(token_count),0) FROM chunk_cache"
+            ).fetchone()
+        finally:
+            conn.close()
+        return TokenStats(
+            total_tokens_approx   = t.get("total_tokens_approx", 0),
+            session_tokens        = t.get("session_tokens", 0),
+            claude_tokens         = t.get("claude_tokens") or t.get("active_session_tokens", 0),
+            memory_tokens         = t.get("memory_tokens", 0),
+            session_files         = t.get("session_files", 0),
+            claude_session_files  = t.get("claude_session_files") or t.get("claude_files", 0),
+            status                = t.get("status", "ok"),
+            message               = t.get("message", ""),
+            warn_threshold        = t.get("warn_threshold", WARN_THRESHOLD),
+            distill_threshold     = t.get("distill_threshold", DISTILL_THRESHOLD),
+            cached_chunks         = crow[0] or 0,
+            cached_chunk_tokens   = int(crow[1] or 0),
+        )
+
     SESSIONS_DIR = Path(os.environ.get("SESSIONS_DIR",
                         Path.home() / ".openclaw/agents/main/sessions"))
     MEMORY_DIR   = Path(os.environ.get("MEMORY_DIR",
-                        "/home/ec2-user/.openclaw/workspace/memory"))
+                        str(Path.home() / ".openclaw" / "workspace" / "memory")))
 
     def _approx_tokens(p: Path) -> int:
         try:
@@ -187,6 +230,20 @@ async def token_stats(request: Request) -> TokenStats:
 
 @router.get("/session/current", response_model=CurrentSessionOut)
 async def current_session(request: Request) -> CurrentSessionOut:
+    # Prefer push_cache session data (set by local service, has real values).
+    pushed = _load_push_cache(request)
+    if pushed and pushed.get("session") and pushed["session"].get("session_id"):
+        s = pushed["session"]
+        return CurrentSessionOut(
+            session_id          = s.get("session_id"),
+            session_file        = s.get("session_file"),
+            token_count_approx  = s.get("token_count_approx", 0),
+            message_count       = s.get("message_count", 0),
+            channel             = s.get("channel"),
+            started_at          = s.get("started_at"),
+            last_updated_at     = s.get("last_updated_at"),
+        )
+
     SESSIONS_DIR = Path(os.environ.get(
         "SESSIONS_DIR",
         Path.home() / ".openclaw/agents/main/sessions",
@@ -287,7 +344,7 @@ async def session_stream(request: Request, interval: int = 10) -> StreamingRespo
     WARN_THRESHOLD    = int(os.environ.get("SMART_MEMORY_WARN_TOKENS",   "30000"))
     DISTILL_THRESHOLD = int(os.environ.get("SMART_MEMORY_DISTILL_TOKENS", "30000"))
     MEMORY_DIR        = Path(os.environ.get("MEMORY_DIR",
-                             "/home/ec2-user/.openclaw/workspace/memory"))
+                             str(Path.home() / ".openclaw" / "workspace" / "memory")))
 
     def _approx_tokens(p: Path) -> int:
         try:
