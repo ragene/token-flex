@@ -97,7 +97,7 @@ _SCHEMA_SQL = """
     -- Persisted push snapshot cache — survives ECS restarts
     -- Only ever has one row (id=1), upserted on every push.
     CREATE TABLE IF NOT EXISTS push_cache (
-        id         INTEGER PRIMARY KEY DEFAULT 1,
+        id         INTEGER PRIMARY KEY,
         payload    TEXT NOT NULL,
         updated_at TIMESTAMPTZ DEFAULT NOW()
     );
@@ -208,7 +208,7 @@ _SCHEMA_SQL_SQLITE = """
     );
 
     CREATE TABLE IF NOT EXISTS push_cache (
-        id         INTEGER PRIMARY KEY DEFAULT 1,
+        id         INTEGER PRIMARY KEY,
         payload    TEXT NOT NULL,
         updated_at TEXT DEFAULT (datetime('now'))
     );
@@ -276,4 +276,4 @@ def init_db(conn) -> None:
         except Exception as e:
             pg_conn.rollback()
             import logging
-            logging.getLogger(__name__).debug("init_db stmt skipped: %s | %.80s", e, stmt)
+            logging.getLogger(__name__).warning("init_db stmt failed: %s | %.120s", e, stmt)
