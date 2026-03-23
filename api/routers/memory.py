@@ -348,11 +348,14 @@ async def full_cycle(body: FullCycleRequest, request: Request) -> FullCycleResul
                     md_files_ingested=total_md,
                     git_ingested=total_git,
                     sessions_ingested=total_sessions,
+                    raw_file_chunks=0,
                     total_chunks=total_chunks,
                     db_entries=db_count,
                     safety_gate_passed=False,
                     md_files_cleared=0,
                     session_files_cleared=0,
+                    chunks_pruned=0,
+                    chunks_remaining=total_chunks,
                     rebuilt_to=None,
                 )
 
@@ -446,7 +449,7 @@ async def full_cycle(body: FullCycleRequest, request: Request) -> FullCycleResul
         md_files_cleared=md_cleared,
         session_files_cleared=sessions_cleared,
         chunks_pruned=pruned if not body.dry_run and safety_passed else 0,
-        chunks_remaining=chunks_remaining if not body.dry_run and safety_passed else conn.execute("SELECT COUNT(*) FROM chunk_cache").fetchone()[0],
+        chunks_remaining=chunks_remaining if not body.dry_run and safety_passed else total_chunks,
         rebuilt_to=rebuilt_to,
     )
 
