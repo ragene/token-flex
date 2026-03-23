@@ -159,5 +159,37 @@ if __name__ == "__main__":
     import threading
     threading.Thread(target=_register_local_session, daemon=True).start()
 
+    # Background push loop — periodically pushes a snapshot to the remote UI.
+    # Only runs when TOKEN_FLOW_UI_URL points at a remote host (not localhost).
+    _remote_ui_url = os.environ.get("TOKEN_FLOW_UI_URL", "").strip().rstrip("/")
+    _is_remote = _remote_ui_url and "localhost" not in _remote_ui_url and "127.0.0.1" not in _remote_ui_url
+
+    if _is_remote:
+        def _remote_push_loop():
+            import time
+            from api.push_client import push_snapshot
+
+            # Wait for server to be ready before first push
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                try:
+                    import urllib.request
+                    urllib.request.urlopen(f"http://localhost:{PORT}/health", timeout=2)
+                    break
+                except Exception:
+                    time.sleep(2)
+
+            print(f"🚀 Remote push loop started → {_remote_ui_url} (every 30s)")
+            while True:
+                try:
+                    push_snapshot(DATABASE_URL, ui_url=_remote_ui_url)
+                except Exception as exc:
+                    print(f"⚠️  Remote push failed (non-fatal): {exc}")
+                time.sleep(30)
+
+        threading.Thread(target=_remote_push_loop, daemon=True).start()
+    else:
+        print("ℹ️  Remote push loop skipped (TOKEN_FLOW_UI_URL not set or is localhost)")
+
     app = create_app(database_url=DATABASE_URL)
     uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")
