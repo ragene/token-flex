@@ -55,16 +55,27 @@ class WSManager:
     async def notify(
         self,
         snapshot_fn: Callable[[Optional[str]], dict],
+        require_email: bool = False,
     ) -> None:
         """Call snapshot_fn(user_email) for each connected client and send
         the result only to that client.  Dead connections are pruned.
 
         This ensures every user sees only their own data on live pushes.
+
+        Args:
+            snapshot_fn:   Called with each client's user_email to build a scoped snapshot.
+            require_email: When True, skip clients whose user_email is None (i.e. unauthenticated
+                           sockets that somehow slipped through). Prevents unfiltered data from
+                           being broadcast to anonymous connections when auth is active.
         """
         if not self._clients:
             return
         dead: list[WebSocket] = []
         for ws, email in list(self._clients.items()):
+            if require_email and email is None:
+                # Skip unauthenticated sockets when scoped data is being pushed.
+                # Their next manual ping will request a fresh snapshot via the WS loop.
+                continue
             try:
                 data = snapshot_fn(email)
                 await ws.send_text(json.dumps(data, default=_default))

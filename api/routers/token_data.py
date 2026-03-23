@@ -24,7 +24,7 @@ from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Query, Request, WebSocket, WebSocketDisconnect
-from api.auth import verify_token, decode_token, get_current_user_email
+from api.auth import verify_token, decode_token, get_current_user_email, AUTH0_DOMAIN
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -196,7 +196,10 @@ def _build_tokens_and_session(database_url: str, user_email: Optional[str] = Non
                     session["message_count"] = mc
                     session["started_at"] = started_at
 
-        # Enrich with local_sessions identity — scoped to the requesting user
+        # Enrich with local_sessions identity — scoped to the requesting user.
+        # When user_email is set we only look up THAT user. We deliberately do NOT
+        # fall back to "most recent" — that would leak a different user's identity
+        # into an authenticated user's session card.
         try:
             c2 = pg_connect(database_url)
             init_db(c2)
@@ -500,7 +503,6 @@ async def token_data_ws(websocket: WebSocket, token: Optional[str] = None) -> No
     - Clients can also send any text (e.g. "ping") to request an immediate refresh.
     """
     import asyncio
-    from api.auth import AUTH0_DOMAIN
 
     PUSH_INTERVAL = 10  # seconds between server-initiated pushes
 
@@ -515,6 +517,11 @@ async def token_data_ws(websocket: WebSocket, token: Optional[str] = None) -> No
             user_email = payload.get("email")
         except Exception:
             await websocket.close(code=4401, reason="Invalid token")
+            return
+        # Defensive: if auth is required but email is missing from JWT, reject rather
+        # than falling through with user_email=None which would expose all users' data.
+        if not user_email:
+            await websocket.close(code=4401, reason="Token missing email claim")
             return
 
     database_url: str = websocket.app.state.database_url
@@ -594,7 +601,7 @@ async def push_snapshot(body: PushSnapshotIn, request: Request) -> dict:
     # broadcasting the shared push payload — prevents data cross-contamination
     # between users when multiple people are connected simultaneously.
     database_url: str = request.app.state.database_url
-    await ws_manager.notify(lambda email: _build_snapshot(database_url, user_email=email))
+    await ws_manager.notify(lambda email: _build_snapshot(database_url, user_email=email), require_email=bool(AUTH0_DOMAIN))
     return {"ok": True, "clients_notified": ws_manager.connection_count}
 
 
@@ -630,7 +637,7 @@ async def record_usage(body: TokenUsageIn, request: Request, token_payload: Opti
 
     # Notify each connected WS client with their own scoped snapshot
     if ws_manager.connection_count > 0:
-        await ws_manager.notify(lambda email: _build_snapshot(database_url, user_email=email))
+        await ws_manager.notify(lambda email: _build_snapshot(database_url, user_email=email), require_email=bool(AUTH0_DOMAIN))
 
     return out
 
@@ -856,19 +863,48 @@ async def clear_token_usage(request: Request, token_payload: Optional[dict] = De
     finally:
         conn.close()
 
-    # Patch push_cache summary to zeros so next WS snapshot reflects the clear
-    # immediately, without waiting for the next local push cycle.
+    # Patch push_cache so the next WS snapshot reflects the clear immediately,
+    # without waiting for the next local push cycle.
+    # IMPORTANT: only remove the cleared user's rows from push_cache events/summary.
+    # Zeroing the entire push_cache would wipe OTHER users' data from their views.
     try:
         cached = _load_push_cache(database_url)
         if cached:
+            cached_events = cached.get("events") or []
+            if user_email:
+                # Remove only this user's events; leave other users' rows intact.
+                cached["events"] = [
+                    e for e in cached_events
+                    if e.get("user_email") != user_email
+                ]
+            else:
+                # Admin/no-auth clear — wipe everything.
+                cached["events"] = []
+
+            # Recompute summary from the surviving events so grand totals stay correct.
+            surviving = cached["events"]
+            from collections import defaultdict
+            agg: dict = defaultdict(lambda: {"total_calls": 0, "prompt_tokens": 0,
+                                              "completion_tokens": 0, "total_tokens": 0,
+                                              "cost_usd": 0.0})
+            for e in surviving:
+                key = (e.get("operation", ""), e.get("model", ""))
+                agg[key]["total_calls"]       += 1
+                agg[key]["prompt_tokens"]     += e.get("prompt_tokens") or 0
+                agg[key]["completion_tokens"] += e.get("completion_tokens") or 0
+                agg[key]["total_tokens"]      += e.get("total_tokens") or 0
+                agg[key]["cost_usd"]          += e.get("cost_usd") or 0.0
+            summary_rows_patched = [
+                {"operation": k[0], "model": k[1], **v} for k, v in agg.items()
+            ]
             cached["summary"] = {
-                "rows": [],
-                "grand_total_tokens": 0,
-                "grand_total_calls": 0,
-                "grand_cost_usd": 0.0,
+                "rows": summary_rows_patched,
+                "grand_total_tokens": sum(r["total_tokens"] for r in summary_rows_patched),
+                "grand_total_calls":  sum(r["total_calls"]  for r in summary_rows_patched),
+                "grand_cost_usd":     round(sum(r["cost_usd"] for r in summary_rows_patched), 6),
             }
-            cached["events"] = []
             cached["ts"] = datetime.utcnow().isoformat() + "Z"
+
             conn2 = _conn(request)
             try:
                 payload_json = _json.dumps(cached)
@@ -884,7 +920,7 @@ async def clear_token_usage(request: Request, token_payload: Optional[dict] = De
         log.debug("push_cache patch after clear failed (non-fatal): %s", exc)
 
     # Notify each connected WS client with their own scoped snapshot
-    await ws_manager.notify(lambda email: _build_snapshot(database_url, user_email=email))
+    await ws_manager.notify(lambda email: _build_snapshot(database_url, user_email=email), require_email=bool(AUTH0_DOMAIN))
 
     return {"status": "cleared", "rows_deleted": count}
 
