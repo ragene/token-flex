@@ -1,33 +1,7 @@
-version: 0.2
-
-env:
-  variables:
-    AWS_DEFAULT_REGION: us-west-2
-    ECS_CLUSTER: token-flow-ui
-    ECS_SERVICE: token-flow-ui
-
-phases:
-  pre_build:
-    commands:
-      - echo Logging in to Amazon ECR...
-      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
-      - IMAGE=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/token-flow
-      - IMAGE_TAG=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c1-7)
-
-  build:
-    commands:
-      - echo Building token-flow image...
-      - docker build -t $IMAGE:$IMAGE_TAG -t $IMAGE:latest .
-
-  post_build:
-    commands:
-      - echo Pushing image...
-      - docker push $IMAGE:$IMAGE_TAG
-      - docker push $IMAGE:latest
-      - bash aws/patch-and-deploy.sh
-      - printf '[{"name":"token-flow","imageUri":"%s"}]' $IMAGE:$IMAGE_TAG > imagedefinitions.json
-      - echo Done.
-
-artifacts:
-  files:
-    - imagedefinitions.json
+# DEPRECATED — CodeBuild project (token-flow-build) has been deleted.
+# Deployment is now local-only. Use ecs-deploy.sh instead:
+#
+#   cd token-flow/aws && bash ecs-deploy.sh
+#   cd token-flow/aws && bash ecs-deploy.sh --skip-build   # force-redeploy without rebuild
+#
+# This file is kept for reference only. Do not re-create the CodeBuild project.
