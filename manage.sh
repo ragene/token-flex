@@ -65,6 +65,21 @@ _pid_on_port() {
   echo "$pid"
 }
 
+# Resolve owner email from tf_auth.json cache (used to tag push snapshots)
+_resolve_owner_email() {
+  python3 -c "
+import json, pathlib, time
+p = pathlib.Path('${DEFAULT_TF_AUTH}').expanduser()
+try:
+    d = json.loads(p.read_text())
+    if time.time() < d.get('expires_at', 0) - 60:
+        email = (d.get('user') or {}).get('email', '').strip()
+        if email: print(email)
+except Exception:
+    pass
+" 2>/dev/null || true
+}
+
 # Resolve ANTHROPIC_API_KEY from env or OpenClaw auth-profiles
 _resolve_api_key() {
   if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
@@ -130,6 +145,7 @@ case "$cmd" in
     _MEMORY_DIR="${MEMORY_DIR:-${DEFAULT_MEMORY_DIR}}"
     _SESSIONS_DIR="${SESSIONS_DIR:-${DEFAULT_SESSIONS_DIR}}"
     _S3_BUCKET="${S3_BUCKET:-smart-memory}"
+    _OWNER_EMAIL="${OWNER_EMAIL:-$(_resolve_owner_email)}"
 
     _env=(
       "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}"
@@ -144,6 +160,7 @@ case "$cmd" in
       "SECRET_KEY=${SECRET_KEY:-}"
       "TOKEN_FLOW_UI_URL=${TOKEN_FLOW_UI_URL:-}"
       "TOKEN_FLOW_AUTH_TOKEN=${TOKEN_FLOW_AUTH_TOKEN:-}"
+      "OWNER_EMAIL=${_OWNER_EMAIL}"
     )
 
     nohup env "${_env[@]}" PYTHONUNBUFFERED=1 python3 -u "$SERVER_SCRIPT" >> "$LOG_FILE" 2>&1 &
@@ -240,6 +257,7 @@ except Exception:
     fi
 
     _TOKEN_FLOW_UI_URL="${TOKEN_FLOW_UI_URL:-}"
+    _OWNER_EMAIL="${OWNER_EMAIL:-$(_resolve_owner_email)}"
 
     nohup env \
       ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
@@ -250,6 +268,7 @@ except Exception:
       DATABASE_URL="${_DATABASE_URL}" \
       TOKEN_FLOW_UI_URL="${_TOKEN_FLOW_UI_URL}" \
       TOKEN_FLOW_JWT="${_TOKEN_FLOW_JWT}" \
+      OWNER_EMAIL="${_OWNER_EMAIL}" \
       PYTHONUNBUFFERED=1 \
       python3 -u "${SCRIPT_DIR}/memory_distill.py" poll-sqs \
         --output "${_MEMORY_DIR}/distilled.md" \

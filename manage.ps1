@@ -93,6 +93,15 @@ function Resolve-TfJwt {
     return $jwt
 }
 
+function Resolve-OwnerEmail {
+    # Allow explicit override via env var (e.g. set in ECS task def or CI)
+    if ($env:OWNER_EMAIL) { return $env:OWNER_EMAIL }
+    $authPath = $DEFAULT_TF_AUTH.Replace('\','/')
+    $pyCode = 'import json, pathlib, time; p = pathlib.Path(r"' + $authPath + '"); d = json.loads(p.read_text()); e = (d.get(\"user\") or {}).get(\"email\",\"\").strip(); print(e) if e and time.time() < d.get(\"expires_at\",0)-60 else None'
+    $email = python -c $pyCode 2>$null
+    return $email
+}
+
 # ── Commands ──────────────────────────────────────────────────────────────────
 switch ($Command) {
 
@@ -119,11 +128,12 @@ switch ($Command) {
         Resolve-ApiKey
         Load-DotEnv
 
-        $db       = if ($env:TOKEN_FLOW_DB)   { $env:TOKEN_FLOW_DB }   else { $DEFAULT_DB }
-        $ws       = if ($env:WORKSPACE)        { $env:WORKSPACE }       else { $DEFAULT_WORKSPACE }
-        $mem      = if ($env:MEMORY_DIR)       { $env:MEMORY_DIR }      else { $DEFAULT_MEMORY }
-        $sessions = if ($env:SESSIONS_DIR)     { $env:SESSIONS_DIR }    else { $DEFAULT_SESSIONS }
-        $s3bucket = if ($env:S3_BUCKET)        { $env:S3_BUCKET }       else { "smart-memory" }
+        $db         = if ($env:TOKEN_FLOW_DB)   { $env:TOKEN_FLOW_DB }   else { $DEFAULT_DB }
+        $ws         = if ($env:WORKSPACE)        { $env:WORKSPACE }       else { $DEFAULT_WORKSPACE }
+        $mem        = if ($env:MEMORY_DIR)       { $env:MEMORY_DIR }      else { $DEFAULT_MEMORY }
+        $sessions   = if ($env:SESSIONS_DIR)     { $env:SESSIONS_DIR }    else { $DEFAULT_SESSIONS }
+        $s3bucket   = if ($env:S3_BUCKET)        { $env:S3_BUCKET }       else { "smart-memory" }
+        $ownerEmail = Resolve-OwnerEmail
 
         $procEnv = @{
             ANTHROPIC_API_KEY  = $env:ANTHROPIC_API_KEY
@@ -137,6 +147,7 @@ switch ($Command) {
             AUTH0_CLIENT_ID    = "$($env:AUTH0_CLIENT_ID)"
             SECRET_KEY         = "$($env:SECRET_KEY)"
             TOKEN_FLOW_UI_URL  = "$($env:TOKEN_FLOW_UI_URL)"
+            OWNER_EMAIL        = "$ownerEmail"
             PYTHONUNBUFFERED   = "1"
             PYTHONIOENCODING   = "utf-8"
         }
@@ -259,6 +270,8 @@ switch ($Command) {
             Write-Host "   WARNING: No valid cached token — run the token-flow service first to authenticate"
         }
 
+        $ownerEmail = Resolve-OwnerEmail
+
         $env:ANTHROPIC_API_KEY         = $env:ANTHROPIC_API_KEY
         $env:WORKSPACE                 = $ws
         $env:MEMORY_DIR                = $mem
@@ -267,6 +280,7 @@ switch ($Command) {
         $env:DATABASE_URL              = $dbUrl
         $env:TOKEN_FLOW_UI_URL         = $tfUiUrl
         $env:TOKEN_FLOW_JWT            = $jwt
+        $env:OWNER_EMAIL               = $ownerEmail
         $env:PYTHONUNBUFFERED          = "1"
 
         $pollerScript = Join-Path $SCRIPT_DIR "memory_distill.py"

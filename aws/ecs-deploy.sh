@@ -31,14 +31,17 @@ aws ecr describe-repositories --repository-names token-flow --region $REGION \
 echo "  ✓ ECR repo ready"
 
 # ── 2. Build & push Docker image ─────────────────────────────────────────────
+# Resolve SCRIPT_DIR before any cd so it stays correct throughout
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
 if [[ "$1" != "--skip-build" ]]; then
   echo ""
   echo "🐳 Building and pushing Docker image..."
   aws ecr get-login-password --region $REGION | \
     docker login --username AWS --password-stdin "$ECR"
 
-  cd "$(dirname "$0")/.."
-  docker build -t "$IMAGE" . 2>&1 | tail -5
+  docker build -t "$IMAGE" "$REPO_DIR" 2>&1 | tail -5
   docker push "$IMAGE" 2>&1 | tail -3
   echo "  ✓ Image pushed: $IMAGE"
 else
@@ -48,8 +51,7 @@ fi
 # ── 3. Patch task definition with required env vars ───────────────────────────
 # Read secrets from .env (same dir as this script's parent) so they are
 # never hardcoded in source but always applied on every deploy.
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ENV_FILE="$SCRIPT_DIR/../.env"
+ENV_FILE="$REPO_DIR/.env"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "❌ .env not found at $ENV_FILE — cannot inject secrets into task definition"
