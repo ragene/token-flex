@@ -179,13 +179,13 @@ if __name__ == "__main__":
                 except Exception:
                     time.sleep(2)
 
-            print(f"🚀 Remote push loop started → {_remote_ui_url} (every 30s)")
+            print(f"🚀 Remote push loop started → {_remote_ui_url} (immediate + every 30s)")
             while True:
                 try:
                     push_snapshot(DATABASE_URL, ui_url=_remote_ui_url)
                 except Exception as exc:
                     print(f"⚠️  Remote push failed (non-fatal): {exc}")
-                time.sleep(30)
+                time.sleep(30)  # first iteration runs immediately, then every 30s
 
         threading.Thread(target=_remote_push_loop, daemon=True).start()
     else:
