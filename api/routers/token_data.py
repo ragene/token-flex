@@ -196,13 +196,21 @@ def _build_tokens_and_session(database_url: str, user_email: Optional[str] = Non
                     session["message_count"] = mc
                     session["started_at"] = started_at
 
-        # Enrich with local_sessions identity
+        # Enrich with local_sessions identity — scoped to the requesting user
         try:
             c2 = pg_connect(database_url)
             init_db(c2)
-            row = c2.execute(
-                "SELECT email, name, picture, last_seen FROM local_sessions ORDER BY last_seen DESC LIMIT 1"
-            ).fetchone()
+            if user_email:
+                # Return only THIS user's local session identity
+                row = c2.execute(
+                    "SELECT email, name, picture, last_seen FROM local_sessions WHERE email = %s LIMIT 1",
+                    (user_email,)
+                ).fetchone()
+            else:
+                # No user filter (admin / dev mode) — return most recent
+                row = c2.execute(
+                    "SELECT email, name, picture, last_seen FROM local_sessions ORDER BY last_seen DESC LIMIT 1"
+                ).fetchone()
             c2.close()
             if row:
                 session.update({
@@ -317,8 +325,11 @@ def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict
     # Fall back to building from local files (works when running the service locally).
     pushed = _load_push_cache(database_url)
     if pushed:
-        tokens          = pushed.get("tokens")  or {}
-        session         = pushed.get("session") or {}
+        tokens = pushed.get("tokens") or {}
+        # Never copy push_cache session wholesale — it contains the local machine
+        # owner's identity. Always use the per-user session built above, or an
+        # empty shell for users with no local session record.
+        session = session  # keep the user-scoped session built above
         # token_usage lives in local SQLite (not Postgres), so the DB queries above
         # return empty rows.  When the DB has no data, pull summary/events from the
         # push_cache snapshot sent by the local service — but only when no user filter

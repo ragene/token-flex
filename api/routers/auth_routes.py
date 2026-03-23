@@ -90,16 +90,21 @@ def exchange_auth0_token(
         row = cur.fetchone()
 
         if row is None:
+            # First user ever becomes admin; all subsequent users start as viewer
+            admin_exists = conn.execute(
+                "SELECT 1 FROM tf_users WHERE role = 'admin' LIMIT 1"
+            ).fetchone()
+            default_role = 'viewer' if admin_exists else 'admin'
             cur = conn.execute(
                 """INSERT INTO tf_users (email, name, auth0_sub, role, is_active, last_login)
-                   VALUES (%s, %s, %s, 'admin', TRUE, NOW())
+                   VALUES (%s, %s, %s, %s, TRUE, NOW())
                    RETURNING id, role""",
-                (email, name, auth0_sub)
+                (email, name, auth0_sub, default_role)
             )
             row = cur.fetchone()
         else:
             conn.execute(
-                "UPDATE tf_users SET auth0_sub=%s, last_login=NOW(), name=%s, is_active=TRUE WHERE email=%s",
+                "UPDATE tf_users SET auth0_sub=%s, last_login=NOW(), name=%s WHERE email=%s",
                 (auth0_sub, name, email)
             )
         conn.commit()
@@ -276,20 +281,24 @@ async def device_flow_poll(request: Request):
 
     conn = get_conn(request)
     try:
-        # Same upsert logic as /auth/exchange — always activate on successful Auth0 login
+        # Same upsert logic as /auth/exchange — first user becomes admin, rest are viewers
         cur = conn.execute("SELECT id, role FROM tf_users WHERE email = %s", (email,))
         row = cur.fetchone()
         if row is None:
+            admin_exists = conn.execute(
+                "SELECT 1 FROM tf_users WHERE role = 'admin' LIMIT 1"
+            ).fetchone()
+            default_role = 'viewer' if admin_exists else 'admin'
             cur = conn.execute(
                 """INSERT INTO tf_users (email, name, auth0_sub, role, is_active, last_login)
-                   VALUES (%s, %s, %s, 'admin', TRUE, NOW())
+                   VALUES (%s, %s, %s, %s, TRUE, NOW())
                    RETURNING id, role""",
-                (email, name, auth0_sub),
+                (email, name, auth0_sub, default_role),
             )
             row = cur.fetchone()
         else:
             conn.execute(
-                "UPDATE tf_users SET auth0_sub=%s, last_login=NOW(), name=%s, is_active=TRUE WHERE email=%s",
+                "UPDATE tf_users SET auth0_sub=%s, last_login=NOW(), name=%s WHERE email=%s",
                 (auth0_sub, name, email),
             )
         conn.commit()
