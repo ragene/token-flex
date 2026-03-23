@@ -259,8 +259,11 @@ def _build_snapshot(db_path: str) -> dict:
     c = pg_connect(_normalize_db_url(db_path))
     init_db(c)
     try:
-        # Token usage summary
-        rows = c.execute("""
+        # Token usage summary — chat/session ops only (excludes engine ops like
+        # summarize/ingest_summarize/ingest_git which belong in the Activity view).
+        _CHAT_OPS = ("'chat'",)
+        _CHAT_FILTER = f"WHERE operation IN ({','.join(_CHAT_OPS)})"
+        rows = c.execute(f"""
             SELECT operation, model,
                    COUNT(*) as total_calls,
                    COALESCE(SUM(prompt_tokens),0)     as prompt_tokens,
@@ -268,6 +271,7 @@ def _build_snapshot(db_path: str) -> dict:
                    COALESCE(SUM(total_tokens),0)      as total_tokens,
                    COALESCE(SUM(cost_usd),0.0)        as cost_usd
             FROM token_usage
+            {_CHAT_FILTER}
             GROUP BY operation, model
             ORDER BY total_tokens DESC
         """).fetchall()
@@ -287,14 +291,13 @@ def _build_snapshot(db_path: str) -> dict:
         """).fetchall()
         chunks = [dict(r) for r in chunk_rows]
 
-        # Latest 100 token events — always include user_email so server-side
-        # per-user filtering works correctly when the snapshot is served from
-        # push_cache to multiple authenticated users.
-        event_rows = c.execute("""
+        # Latest 100 chat/session token events only — excludes engine ops.
+        event_rows = c.execute(f"""
             SELECT id, COALESCE(user_email, '') as user_email, operation, model,
                    prompt_tokens, completion_tokens, total_tokens,
                    cost_usd, source_label, created_at
             FROM token_usage
+            {_CHAT_FILTER}
             ORDER BY created_at DESC
             LIMIT 100
         """).fetchall()

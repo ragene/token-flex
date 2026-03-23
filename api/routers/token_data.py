@@ -267,12 +267,19 @@ def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict
     c = pg_connect(database_url)
     init_db(c)
 
-    # Build WHERE clause for user filtering
-    _email_filter = "WHERE user_email = ?" if user_email else ""
-    _email_params = (user_email,) if user_email else ()
+    # Build WHERE clause for user + chat-op filtering.
+    # Token Data view shows chat/session ops only — engine ops (summarize, ingest_*)
+    # are internal pipeline metrics and belong in the Activity view, not Token Data.
+    _CHAT_OP_FILTER = "operation = 'chat'"
+    if user_email:
+        _email_filter = f"WHERE user_email = ? AND {_CHAT_OP_FILTER}"
+        _email_params = (user_email,)
+    else:
+        _email_filter = f"WHERE {_CHAT_OP_FILTER}"
+        _email_params = ()
 
     try:
-        # Per-operation/model summary (filtered by user)
+        # Per-operation/model summary (chat ops, filtered by user)
         rows = c.execute(f"""
             SELECT operation, model,
                    COUNT(*) as total_calls,
@@ -301,7 +308,7 @@ def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict
         """).fetchall()
         chunks = [dict(r) for r in chunk_rows]
 
-        # Latest 100 token events (filtered by user)
+        # Latest 100 chat/session token events (filtered by user, chat ops only)
         event_rows = c.execute(f"""
             SELECT id, user_email, operation, model,
                    prompt_tokens, completion_tokens, total_tokens,
@@ -670,8 +677,13 @@ async def record_usage(body: TokenUsageIn, request: Request, token_payload: Opti
 async def token_summary(request: Request, token_payload: Optional[dict] = Depends(verify_token)) -> TokenSummaryResponse:
     """Aggregated totals grouped by operation + model, scoped to the requesting user."""
     user_email = get_current_user_email(token_payload)
-    email_filter = "WHERE user_email = ?" if user_email else ""
-    email_params = (user_email,) if user_email else ()
+    _chat = "operation = 'chat'"
+    if user_email:
+        email_filter = f"WHERE user_email = ? AND {_chat}"
+        email_params = (user_email,)
+    else:
+        email_filter = f"WHERE {_chat}"
+        email_params = ()
     conn = _conn(request)
     try:
         rows = conn.execute(f"""
@@ -724,15 +736,18 @@ async def list_events(
     limit:     int           = Query(200, ge=1, le=1000),
     offset:    int           = Query(0,   ge=0),
 ) -> List[TokenUsageOut]:
-    """Raw event rows, newest first, scoped to the requesting user."""
+    """Raw event rows, newest first, scoped to the requesting user. Chat ops only by default."""
     user_email = get_current_user_email(token_payload)
     conn = _conn(request)
     try:
         conditions, params = [], []
         if user_email:
             conditions.append("user_email = ?"); params.append(user_email)
+        # Default to chat ops only — engine ops (summarize, ingest_*) are pipeline metrics
         if operation:
             conditions.append("operation = ?"); params.append(operation)
+        else:
+            conditions.append("operation = 'chat'")
         if model:
             conditions.append("model = ?"); params.append(model)
         where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
