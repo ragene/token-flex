@@ -942,3 +942,160 @@ def _row_out(r) -> TokenUsageOut:
         source_label=r["source_label"],
         created_at=created,
     )
+
+
+# ── Local sessions admin endpoints ───────────────────────────────────────────
+
+@router.get("/token-data/sessions", dependencies=[Depends(require_role("admin"))])
+async def list_local_sessions(request: Request, token_payload: Optional[dict] = Depends(verify_token)) -> list:
+    """
+    List all known local sessions (users who have pushed a snapshot).
+    Admin only. Returns email, name, host, last_seen, and per-user token usage totals.
+    """
+    database_url: str = request.app.state.database_url
+    conn = _conn(request)
+    try:
+        rows = conn.execute("""
+            SELECT email, name, picture, host, session_id, last_seen, created_at
+            FROM local_sessions
+            ORDER BY last_seen DESC
+        """).fetchall()
+        sessions = []
+        for r in rows:
+            last_seen = r["last_seen"]
+            if last_seen and not isinstance(last_seen, str):
+                last_seen = last_seen.isoformat()
+            created_at = r["created_at"]
+            if created_at and not isinstance(created_at, str):
+                created_at = created_at.isoformat()
+
+            # Per-user token usage totals from token_usage
+            usage = conn.execute("""
+                SELECT
+                    COUNT(*) as total_calls,
+                    COALESCE(SUM(total_tokens), 0) as total_tokens,
+                    COALESCE(SUM(cost_usd), 0.0) as cost_usd
+                FROM token_usage WHERE user_email = %s
+            """, (r["email"],)).fetchone()
+
+            # Check if this user's email matches the push_cache owner_email
+            pushed = _load_push_cache(database_url)
+            owner_email = (pushed.get("owner_email") or "") if pushed else ""
+
+            sessions.append({
+                "email":       r["email"],
+                "name":        r["name"],
+                "picture":     r["picture"],
+                "host":        r["host"],
+                "session_id":  r["session_id"],
+                "last_seen":   last_seen,
+                "created_at":  created_at,
+                "is_active":   r["email"] == owner_email,
+                "total_calls": int(usage["total_calls"] or 0),
+                "total_tokens": int(usage["total_tokens"] or 0),
+                "cost_usd":    round(float(usage["cost_usd"] or 0), 6),
+            })
+        return sessions
+    finally:
+        conn.close()
+
+
+@router.post("/token-data/sessions/{email}/distill", status_code=202,
+             dependencies=[Depends(require_role("admin"))])
+async def distill_session(email: str, request: Request,
+                          token_payload: Optional[dict] = Depends(verify_token)) -> dict:
+    """
+    Trigger distill+clear for a specific user's token_usage rows.
+    Admin only. Sends clear_tokens_only action to SQS (never rewrites machine files).
+    """
+    from urllib.parse import unquote
+    email = unquote(email)
+    admin_email = get_current_user_email(token_payload) or "admin"
+    try:
+        import boto3
+        sqs = boto3.client("sqs", region_name=AWS_REGION)
+        message = {
+            "action": "clear_tokens_only",
+            "requested_at": datetime.utcnow().isoformat(),
+            "triggered_by": admin_email,
+            "user_email": email,
+        }
+        resp = sqs.send_message(QueueUrl=SQS_QUEUE_URL, MessageBody=_json.dumps(message))
+        log.info("Admin distill trigger: %s clearing tokens for %s (msg=%s)",
+                 admin_email, email, resp.get("MessageId"))
+        return {"status": "queued", "user_email": email,
+                "message_id": resp.get("MessageId"), "triggered_by": admin_email}
+    except Exception as exc:
+        log.error("SQS send_message failed: %s", exc)
+        from fastapi import HTTPException
+        raise HTTPException(status_code=502, detail=f"SQS error: {exc}")
+
+
+@router.delete("/token-data/sessions/{email}/clear", status_code=200,
+               dependencies=[Depends(require_role("admin"))])
+async def clear_session_tokens(email: str, request: Request,
+                               token_payload: Optional[dict] = Depends(verify_token)) -> dict:
+    """
+    Immediately delete token_usage rows for a specific user. Admin only.
+    Also patches push_cache to remove that user's events.
+    """
+    from urllib.parse import unquote
+    email = unquote(email)
+    database_url: str = request.app.state.database_url
+    conn = _conn(request)
+    try:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM token_usage WHERE user_email = %s", (email,)
+        ).fetchone()[0]
+        conn.execute("DELETE FROM token_usage WHERE user_email = %s", (email,))
+        conn.commit()
+        log.info("Admin cleared %d token_usage rows for %s", count, email)
+    finally:
+        conn.close()
+
+    # Patch push_cache — remove this user's events only
+    try:
+        cached = _load_push_cache(database_url)
+        if cached:
+            cached["events"] = [
+                e for e in (cached.get("events") or [])
+                if e.get("user_email") != email
+            ]
+            surviving = cached["events"]
+            from collections import defaultdict
+            agg: dict = defaultdict(lambda: {"total_calls": 0, "prompt_tokens": 0,
+                                              "completion_tokens": 0, "total_tokens": 0,
+                                              "cost_usd": 0.0})
+            for e in surviving:
+                key = (e.get("operation", ""), e.get("model", ""))
+                agg[key]["total_calls"]       += 1
+                agg[key]["prompt_tokens"]     += e.get("prompt_tokens") or 0
+                agg[key]["completion_tokens"] += e.get("completion_tokens") or 0
+                agg[key]["total_tokens"]      += e.get("total_tokens") or 0
+                agg[key]["cost_usd"]          += e.get("cost_usd") or 0.0
+            rows_p = [{"operation": k[0], "model": k[1], **v} for k, v in agg.items()]
+            cached["summary"] = {
+                "rows": rows_p,
+                "grand_total_tokens": sum(r["total_tokens"] for r in rows_p),
+                "grand_total_calls":  sum(r["total_calls"]  for r in rows_p),
+                "grand_cost_usd":     round(sum(r["cost_usd"] for r in rows_p), 6),
+            }
+            cached["ts"] = datetime.utcnow().isoformat() + "Z"
+            conn2 = _conn(request)
+            try:
+                conn2.execute(
+                    """INSERT INTO push_cache (id, payload, updated_at) VALUES (1, %s, NOW())
+                       ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()""",
+                    (_json.dumps(cached),)
+                )
+                conn2.commit()
+            finally:
+                conn2.close()
+    except Exception as exc:
+        log.debug("push_cache patch after admin clear failed (non-fatal): %s", exc)
+
+    await ws_manager.notify(
+        lambda em: _build_snapshot(database_url, user_email=em),
+        require_email=bool(AUTH0_DOMAIN)
+    )
+    return {"status": "cleared", "user_email": email, "rows_deleted": count}
