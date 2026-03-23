@@ -564,7 +564,7 @@ async def push_snapshot(body: PushSnapshotIn, request: Request) -> dict:
         finally:
             conn.close()
     except Exception as exc:
-        log.debug("push_cache persist failed (non-fatal): %s", exc)
+        log.warning("push_cache persist FAILED: %s", exc, exc_info=True)
 
     # Notify each client with their own user-scoped snapshot rather than
     # broadcasting the shared push payload — prevents data cross-contamination

@@ -110,6 +110,9 @@ def _row_to_chunk(row) -> ChunkOut:
     )
 
 
+import logging as _logging
+_log = _logging.getLogger(__name__)
+
 def _load_push_cache(request: Request) -> dict | None:
     """Return the last push_cache snapshot, or None."""
     try:
@@ -119,10 +122,12 @@ def _load_push_cache(request: Request) -> dict | None:
             row = conn.execute("SELECT payload FROM push_cache WHERE id = 1").fetchone()
             if row:
                 return _json.loads(row[0])
+            else:
+                _log.warning("push_cache: no row found (id=1)")
         finally:
             conn.close()
-    except Exception:
-        pass
+    except Exception as e:
+        _log.warning("push_cache load failed: %s", e, exc_info=True)
     return None
 
 
