@@ -87,7 +87,7 @@ def _build_tokens_and_session(database_url: str, user_email: Optional[str] = Non
         "SESSIONS_DIR", Path.home() / ".openclaw/agents/main/sessions"
     ))
     MEMORY_DIR = Path(os.environ.get(
-        "MEMORY_DIR", "/home/ec2-user/.openclaw/workspace/memory"
+        "MEMORY_DIR", str(Path.home() / ".openclaw" / "workspace" / "memory")
     ))
 
     def _approx(p: Path) -> int:
@@ -455,7 +455,7 @@ async def token_data_ws(websocket: WebSocket, token: Optional[str] = None) -> No
             return
 
     database_url: str = websocket.app.state.database_url
-    await ws_manager.connect(websocket)
+    await ws_manager.connect(websocket, user_email=user_email)
     try:
         # Send initial snapshot on connect (uses push_cache if available).
         initial = _build_snapshot(database_url, user_email=user_email)
@@ -531,7 +531,11 @@ async def push_snapshot(body: PushSnapshotIn, request: Request) -> dict:
     except Exception as exc:
         log.debug("push_cache persist failed (non-fatal): %s", exc)
 
-    await ws_manager.broadcast(payload)
+    # Notify each client with their own user-scoped snapshot rather than
+    # broadcasting the shared push payload — prevents data cross-contamination
+    # between users when multiple people are connected simultaneously.
+    database_url: str = request.app.state.database_url
+    await ws_manager.notify(lambda email: _build_snapshot(database_url, user_email=email))
     return {"ok": True, "clients_notified": ws_manager.connection_count}
 
 
@@ -565,10 +569,9 @@ async def record_usage(body: TokenUsageIn, request: Request, token_payload: Opti
     finally:
         conn.close()
 
-    # Broadcast updated snapshot to all connected WS clients
+    # Notify each connected WS client with their own scoped snapshot
     if ws_manager.connection_count > 0:
-        snapshot = _build_snapshot(database_url)
-        await ws_manager.broadcast(snapshot)
+        await ws_manager.notify(lambda email: _build_snapshot(database_url, user_email=email))
 
     return out
 
@@ -786,9 +789,8 @@ async def clear_token_usage(request: Request) -> dict:
     except Exception as exc:
         log.debug("push_cache patch after clear failed (non-fatal): %s", exc)
 
-    # Broadcast fresh snapshot to all connected WS clients
-    snapshot = _build_snapshot(database_url)
-    await ws_manager.broadcast(snapshot)
+    # Notify each connected WS client with their own scoped snapshot
+    await ws_manager.notify(lambda email: _build_snapshot(database_url, user_email=email))
 
     return {"status": "cleared", "rows_deleted": count}
 
