@@ -62,7 +62,6 @@ export function getCurrentUser() {
 // Local sessions admin (requires admin role)
 export const getLocalSessions   = ()      => api.get('/token-data/sessions').then(r => r.data)
 export const distillSession     = (email) => api.post(`/token-data/sessions/${encodeURIComponent(email)}/distill`).then(r => r.data)
-export const clearSessionTokens = (email) => api.delete(`/token-data/sessions/${encodeURIComponent(email)}/clear`).then(r => r.data)
 
 // Users management
 export const getUsers = () => api.get('/api/users/').then(r => r.data)

@@ -866,52 +866,6 @@ def poll_sqs(args_ns):
                 except Exception as e:
                     print(f"[SQS poller] ⚠️  distill+clear failed: {e}")
 
-            if action == "clear_tokens_only":
-                # Clear token_usage rows and update cleared_at on remote push_cache.
-                # This covers both DB rows and JSONL-sourced events (via cleared_at).
-                print(f"[SQS poller] Clearing tokens for user_email={msg_user_email or 'all'}...")
-                try:
-                    # 1. Clear local SQLite token_usage rows
-                    import sqlite3 as _sqlite3
-                    _local_db = str(getattr(args_ns, 'db', None) or
-                                    os.environ.get("TOKEN_FLOW_DB",
-                                                   "/home/ec2-user/.openclaw/data/token_flow.db"))
-                    _conn = _sqlite3.connect(_local_db)
-                    if msg_user_email:
-                        _count = _conn.execute(
-                            "SELECT COUNT(*) FROM token_usage WHERE user_email = ?",
-                            (msg_user_email,)
-                        ).fetchone()[0]
-                        _conn.execute("DELETE FROM token_usage WHERE user_email = ?", (msg_user_email,))
-                    else:
-                        _count = _conn.execute("SELECT COUNT(*) FROM token_usage").fetchone()[0]
-                        _conn.execute("DELETE FROM token_usage")
-                    _conn.commit()
-                    _conn.close()
-                    print(f"[SQS poller] ✅ Deleted {_count} local SQLite rows (scope={msg_user_email or 'all'})")
-                except Exception as e:
-                    print(f"[SQS poller] ⚠️  local SQLite clear failed: {e}")
-
-                try:
-                    # 2. Call remote /token-data/clear to update push_cache cleared_at
-                    import urllib.request as _ureq2, json as _j2
-                    _remote_url2 = os.environ.get("TOKEN_FLOW_UI_URL", "").rstrip("/")
-                    if _remote_url2 and startup_token:
-                        _body2 = _j2.dumps({"scoped_user_email": msg_user_email} if msg_user_email else {}).encode()
-                        _req2 = _ureq2.Request(
-                            f"{_remote_url2}/token-data/clear",
-                            data=_body2,
-                            method="DELETE",
-                            headers={"Authorization": f"Bearer {startup_token}",
-                                     "Content-Type": "application/json"},
-                        )
-                        with _ureq2.urlopen(_req2, timeout=10) as _r2:
-                            print(f"[SQS poller] ✅ Remote push_cache cleared_at updated: {_r2.read().decode()[:80]}")
-                    else:
-                        print("[SQS poller] ⚠️  Skipping remote clear (no TOKEN_FLOW_UI_URL or auth token)")
-                except Exception as e:
-                    print(f"[SQS poller] ⚠️  Remote clear_at update failed: {e}")
-
             sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt)
 
         except KeyboardInterrupt:

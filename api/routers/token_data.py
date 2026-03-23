@@ -848,17 +848,9 @@ async def trigger_distill(request: Request, token_payload: Optional[dict] = Depe
     # triggered_by falls back to the JWT email so attribution is always accurate
     triggered_by = (body.get("triggered_by") or user_email or "unknown").strip()
 
-    # Machine owner gets full distill_and_clear (rewrites memory on disk).
-    # Remote viewers only get clear_tokens_only (never touches owner's files).
-    # Owner = push_cache.owner_email matches the requesting user's email.
-    _is_owner = False
-    try:
-        pushed = _load_push_cache(request.app.state.database_url)
-        _owner_email = (pushed.get("owner_email") or "").strip() if pushed else ""
-        _is_owner = (not user_email) or (bool(_owner_email) and user_email == _owner_email)
-    except Exception:
-        pass
-    action = "distill_and_clear" if _is_owner else "clear_tokens_only"
+    # All authenticated users trigger a full distill_and_clear.
+    # The poller runs on the local machine and distills that machine's memory.
+    action = "distill_and_clear"
 
     try:
         import boto3
@@ -886,118 +878,6 @@ async def trigger_distill(request: Request, token_payload: Optional[dict] = Depe
         log.error("SQS send_message failed: %s", exc)
         from fastapi import HTTPException
         raise HTTPException(status_code=502, detail=f"SQS error: {exc}")
-
-
-@router.delete("/token-data/clear", status_code=200)
-async def clear_token_usage(request: Request, token_payload: Optional[dict] = Depends(verify_token)) -> dict:
-    """
-    Delete token_usage rows for the requesting user only.
-    Called by the local service after distillation completes, or manually from the dashboard.
-
-    Scoping logic (first match wins):
-      1. ``scoped_user_email`` in the JSON request body — used by the SQS poller
-         which authenticates with a service JWT but wants to clear a specific user's rows.
-      2. ``user_email`` from the JWT payload — used by browser clients.
-      3. None → clears all rows (dev mode / no auth).
-
-    A service JWT (shared TOKEN_FLOW_AUTH_TOKEN) returns token_payload=None from
-    verify_token, so without body param #1 it would clear ALL rows.  Always pass
-    ``scoped_user_email`` from the poller to avoid that.
-    """
-    # Try to pull scoped_user_email from body (poller path)
-    scoped_user_email: Optional[str] = None
-    try:
-        body = await request.json()
-        scoped_user_email = (body.get("scoped_user_email") or "").strip() or None
-    except Exception:
-        pass
-
-    user_email = scoped_user_email or get_current_user_email(token_payload)
-    database_url: str = request.app.state.database_url
-    conn = _conn(request)
-
-    email_filter = "WHERE user_email = ?" if user_email else ""
-    email_params = (user_email,) if user_email else ()
-
-    try:
-        count = conn.execute(f"SELECT COUNT(*) FROM token_usage {email_filter}", email_params).fetchone()[0]
-        conn.execute(f"DELETE FROM token_usage {email_filter}", email_params)
-        conn.commit()
-        log.info("Cleared %d token_usage rows", count)
-    finally:
-        conn.close()
-
-    # Patch push_cache so the next WS snapshot reflects the clear immediately,
-    # without waiting for the next local push cycle.
-    # IMPORTANT: only remove the cleared user's rows from push_cache events/summary.
-    # Zeroing the entire push_cache would wipe OTHER users' data from their views.
-    try:
-        cached = _load_push_cache(database_url)
-        if cached:
-            cached_events = cached.get("events") or []
-            if user_email:
-                # Remove only this user's events; leave other users' rows intact.
-                cached["events"] = [
-                    e for e in cached_events
-                    if e.get("user_email") != user_email
-                ]
-            else:
-                # Admin/no-auth clear — wipe everything.
-                cached["events"] = []
-
-            # Recompute summary from the surviving events so grand totals stay correct.
-            surviving = cached["events"]
-            from collections import defaultdict
-            agg: dict = defaultdict(lambda: {"total_calls": 0, "prompt_tokens": 0,
-                                              "completion_tokens": 0, "total_tokens": 0,
-                                              "cost_usd": 0.0})
-            for e in surviving:
-                key = (e.get("operation", ""), e.get("model", ""))
-                agg[key]["total_calls"]       += 1
-                agg[key]["prompt_tokens"]     += e.get("prompt_tokens") or 0
-                agg[key]["completion_tokens"] += e.get("completion_tokens") or 0
-                agg[key]["total_tokens"]      += e.get("total_tokens") or 0
-                agg[key]["cost_usd"]          += e.get("cost_usd") or 0.0
-            summary_rows_patched = [
-                {"operation": k[0], "model": k[1], **v} for k, v in agg.items()
-            ]
-            cached["summary"] = {
-                "rows": summary_rows_patched,
-                "grand_total_tokens": sum(r["total_tokens"] for r in summary_rows_patched),
-                "grand_total_calls":  sum(r["total_calls"]  for r in summary_rows_patched),
-                "grand_cost_usd":     round(sum(r["cost_usd"] for r in summary_rows_patched), 6),
-            }
-            cached["ts"] = datetime.utcnow().isoformat() + "Z"
-
-            # Store cleared_at timestamp per user so the local push loop knows
-            # to exclude session events before this point on its next push.
-            # cleared_at is a dict keyed by user_email (or "__all__" for admin clear).
-            _now_iso = datetime.utcnow().isoformat() + "Z"
-            cleared_map = cached.get("cleared_at") or {}
-            if user_email:
-                cleared_map[user_email] = _now_iso
-            else:
-                cleared_map["__all__"] = _now_iso
-            cached["cleared_at"] = cleared_map
-
-            conn2 = _conn(request)
-            try:
-                payload_json = _json.dumps(cached)
-                conn2.execute(
-                    """INSERT INTO push_cache (id, payload, updated_at) VALUES (1, ?, NOW())
-                       ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()""",
-                    (payload_json,),
-                )
-                conn2.commit()
-            finally:
-                conn2.close()
-    except Exception as exc:
-        log.debug("push_cache patch after clear failed (non-fatal): %s", exc)
-
-    # Notify each connected WS client with their own scoped snapshot
-    await ws_manager.notify(lambda email: _build_snapshot(database_url, user_email=email), require_email=bool(AUTH0_DOMAIN))
-
-    return {"status": "cleared", "rows_deleted": count}
 
 
 # ── Internal helper ───────────────────────────────────────────────────────────
@@ -1081,8 +961,7 @@ async def list_local_sessions(request: Request, token_payload: Optional[dict] = 
 async def distill_session(email: str, request: Request,
                           token_payload: Optional[dict] = Depends(verify_token)) -> dict:
     """
-    Trigger distill+clear for a specific user's token_usage rows.
-    Admin only. Sends clear_tokens_only action to SQS (never rewrites machine files).
+    Trigger a full distill+clear for a specific session. Admin only.
     """
     from urllib.parse import unquote
     email = unquote(email)
@@ -1091,7 +970,7 @@ async def distill_session(email: str, request: Request,
         import boto3
         sqs = boto3.client("sqs", region_name=AWS_REGION)
         message = {
-            "action": "clear_tokens_only",
+            "action": "distill_and_clear",
             "requested_at": datetime.utcnow().isoformat(),
             "triggered_by": admin_email,
             "user_email": email,
@@ -1107,71 +986,3 @@ async def distill_session(email: str, request: Request,
         raise HTTPException(status_code=502, detail=f"SQS error: {exc}")
 
 
-@router.delete("/token-data/sessions/{email}/clear", status_code=200,
-               dependencies=[Depends(require_role("admin"))])
-async def clear_session_tokens(email: str, request: Request,
-                               token_payload: Optional[dict] = Depends(verify_token)) -> dict:
-    """
-    Immediately delete token_usage rows for a specific user. Admin only.
-    Also patches push_cache to remove that user's events.
-    """
-    from urllib.parse import unquote
-    email = unquote(email)
-    database_url: str = request.app.state.database_url
-    conn = _conn(request)
-    try:
-        count = conn.execute(
-            "SELECT COUNT(*) FROM token_usage WHERE user_email = %s", (email,)
-        ).fetchone()[0]
-        conn.execute("DELETE FROM token_usage WHERE user_email = %s", (email,))
-        conn.commit()
-        log.info("Admin cleared %d token_usage rows for %s", count, email)
-    finally:
-        conn.close()
-
-    # Patch push_cache — remove this user's events only
-    try:
-        cached = _load_push_cache(database_url)
-        if cached:
-            cached["events"] = [
-                e for e in (cached.get("events") or [])
-                if e.get("user_email") != email
-            ]
-            surviving = cached["events"]
-            from collections import defaultdict
-            agg: dict = defaultdict(lambda: {"total_calls": 0, "prompt_tokens": 0,
-                                              "completion_tokens": 0, "total_tokens": 0,
-                                              "cost_usd": 0.0})
-            for e in surviving:
-                key = (e.get("operation", ""), e.get("model", ""))
-                agg[key]["total_calls"]       += 1
-                agg[key]["prompt_tokens"]     += e.get("prompt_tokens") or 0
-                agg[key]["completion_tokens"] += e.get("completion_tokens") or 0
-                agg[key]["total_tokens"]      += e.get("total_tokens") or 0
-                agg[key]["cost_usd"]          += e.get("cost_usd") or 0.0
-            rows_p = [{"operation": k[0], "model": k[1], **v} for k, v in agg.items()]
-            cached["summary"] = {
-                "rows": rows_p,
-                "grand_total_tokens": sum(r["total_tokens"] for r in rows_p),
-                "grand_total_calls":  sum(r["total_calls"]  for r in rows_p),
-                "grand_cost_usd":     round(sum(r["cost_usd"] for r in rows_p), 6),
-            }
-            cached["ts"] = datetime.utcnow().isoformat() + "Z"
-            conn2 = _conn(request)
-            try:
-                conn2.execute(
-                    """INSERT INTO push_cache (id, payload, updated_at) VALUES (1, %s, NOW())
-                       ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()""",
-                    (_json.dumps(cached),)
-                )
-                conn2.commit()
-            finally:
-                conn2.close()
-    except Exception as exc:
-        log.debug("push_cache patch after admin clear failed (non-fatal): %s", exc)
-
-    await ws_manager.notify(
-        lambda em: _build_snapshot(database_url, user_email=em),
-        require_email=bool(AUTH0_DOMAIN)
-    )
-    return {"status": "cleared", "user_email": email, "rows_deleted": count}

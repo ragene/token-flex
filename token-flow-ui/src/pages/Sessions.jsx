@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { getLocalSessions, distillSession, clearSessionTokens } from '../api.js'
+import { getLocalSessions, distillSession } from '../api.js'
 
 const ACCENT = '#e94560'
 const CARD   = { background: '#16162a', borderRadius: 12, padding: 24, border: '1px solid #2a2a40' }
@@ -81,17 +81,6 @@ export default function Sessions() {
     }
   }
 
-  const handleClear = async (email) => {
-    if (!window.confirm(`Immediately delete all token_usage rows for ${email}? Cannot be undone.`)) return
-    setAction(email, 'clear', 'pending')
-    try {
-      const res = await clearSessionTokens(email)
-      setAction(email, 'clear', { status: 'ok', msg: `Cleared ${res.rows_deleted} rows` })
-      load()
-    } catch (e) {
-      setAction(email, 'clear', { status: 'error', msg: e?.response?.data?.detail || e.message })
-    }
-  }
 
   return (
     <div>
@@ -151,16 +140,9 @@ export default function Sessions() {
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                 <ActionButton label="🧠 Distill & Clear" onClick={() => handleDistill(s.email)}
                   loading={act.distill === 'pending'} disabled={act.clear === 'pending'} />
-                <ActionButton label="🗑 Clear Tokens" onClick={() => handleClear(s.email)}
-                  danger loading={act.clear === 'pending'} disabled={act.distill === 'pending'} />
                 {act.distill && act.distill !== 'pending' && (
                   <span style={{ fontSize: 11, color: act.distill.status === 'ok' ? '#22c55e' : '#ef4444' }}>
                     {act.distill.status === 'ok' ? '✅' : '❌'} {act.distill.msg}
-                  </span>
-                )}
-                {act.clear && act.clear !== 'pending' && (
-                  <span style={{ fontSize: 11, color: act.clear.status === 'ok' ? '#22c55e' : '#ef4444' }}>
-                    {act.clear.status === 'ok' ? '✅' : '❌'} {act.clear.msg}
                   </span>
                 )}
               </div>
