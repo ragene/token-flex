@@ -11,6 +11,7 @@ import Activity from './pages/Activity.jsx'
 import Login from './pages/Login.jsx'
 import AuthCallback from './pages/AuthCallback.jsx'
 import Users from './pages/Users.jsx'
+import Sessions from './pages/Sessions.jsx'
 import PendingAccess from './pages/PendingAccess.jsx'
 import { getCurrentUser } from './api.js'
 
@@ -57,6 +58,7 @@ export default function App() {
           <Route path="chunks" element={<Chunks />} />
           <Route path="summaries" element={<Summaries />} />
           <Route path="ingest" element={<Ingest />} />
+          <Route path="sessions" element={<RequireAdmin><Sessions /></RequireAdmin>} />
           <Route path="users" element={<RequireAdmin><Users /></RequireAdmin>} />
         </Route>
       </Routes>

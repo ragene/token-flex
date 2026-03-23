@@ -18,6 +18,7 @@ const ALL_NAV_ITEMS = [
   { to: '/chunks',     label: '🧩 Chunks',      roles: null },
   { to: '/summaries',  label: '📝 Summaries',   roles: null },
   { to: '/ingest',     label: '📥 Ingest',      roles: null },
+  { to: '/sessions',   label: '🖥️ Sessions',    roles: ['admin'] },
   { to: '/users',      label: '👥 Users',       roles: ['admin'] },
 ]
 

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
-import { getTokenExportUrl, postDistillAndClear } from '../api.js'
+import { getTokenExportUrl, postDistillAndClear, getCurrentUser } from '../api.js'
 
 // In production VITE_API_URL is empty — derive WS URL from current window origin
 // so it routes through Envoy on the same host. For local dev set VITE_API_URL=http://localhost:8001.
@@ -87,6 +87,7 @@ function LiveDot({ connected }) {
 }
 
 export default function TokenData() {
+  const isAdmin = getCurrentUser()?.role === 'admin'
   const [snap, setSnap]               = useState(null)
   const [connected, setConnected]     = useState(false)
   const [error, setError]             = useState(null)
@@ -238,29 +239,31 @@ export default function TokenData() {
                      borderRadius: 8, padding: '7px 16px', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
             ⬇ Export CSV
           </button>
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
-            <button
-              onClick={handleDistill}
-              disabled={distillStatus === 'pending'}
-              style={{
-                background: distillStatus === 'pending' ? '#555' : '#7c3aed',
-                color: '#fff', border: 'none', borderRadius: 8,
-                padding: '7px 16px', cursor: distillStatus === 'pending' ? 'default' : 'pointer',
-                fontSize: 13, fontWeight: 600, opacity: distillStatus === 'pending' ? 0.7 : 1,
-              }}
-              title="Send distill+clear trigger to local service via SQS"
-            >
-              {distillStatus === 'pending' ? '⏳ Queuing…' : '🧠 Distill & Clear'}
-            </button>
-            {distillMsg && (
-              <span style={{
-                fontSize: 11, maxWidth: 260, textAlign: 'right',
-                color: distillStatus === 'error' ? '#ef4444' : '#22c55e',
-              }}>
-                {distillMsg}
-              </span>
-            )}
-          </div>
+          {isAdmin && (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+              <button
+                onClick={handleDistill}
+                disabled={distillStatus === 'pending'}
+                style={{
+                  background: distillStatus === 'pending' ? '#555' : '#7c3aed',
+                  color: '#fff', border: 'none', borderRadius: 8,
+                  padding: '7px 16px', cursor: distillStatus === 'pending' ? 'default' : 'pointer',
+                  fontSize: 13, fontWeight: 600, opacity: distillStatus === 'pending' ? 0.7 : 1,
+                }}
+                title="Send distill+clear trigger to local service via SQS"
+              >
+                {distillStatus === 'pending' ? '⏳ Queuing…' : '🧠 Distill & Clear'}
+              </button>
+              {distillMsg && (
+                <span style={{
+                  fontSize: 11, maxWidth: 260, textAlign: 'right',
+                  color: distillStatus === 'error' ? '#ef4444' : '#22c55e',
+                }}>
+                  {distillMsg}
+                </span>
+              )}
+            </div>
+          )}
         </div>
       </div>
 

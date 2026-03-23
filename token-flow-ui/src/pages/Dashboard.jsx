@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import StatusBadge from '../components/StatusBadge.jsx'
 import TokenMeter from '../components/TokenMeter.jsx'
-import { postDistillAndClear } from '../api.js'
+import { postDistillAndClear, getCurrentUser } from '../api.js'
 
 const BASE_URL = import.meta.env.VITE_API_URL || ''
 const STREAM_INTERVAL = 10 // seconds between server pushes
@@ -29,6 +29,7 @@ function StatCard({ label, value, sub, color }) {
 }
 
 export default function Dashboard() {
+  const isAdmin = getCurrentUser()?.role === 'admin'
   const [data, setData] = useState(null)
   const [session, setSession] = useState(null)
   const [error, setError] = useState(null)
@@ -118,12 +119,14 @@ export default function Dashboard() {
                      borderRadius: 8, padding: '6px 14px', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
             ↻ Refresh
           </button>
-          <button onClick={handleDistill} disabled={distilling}
-            style={{ background: distilling ? '#3a1a2a' : '#4a0020', color: distilling ? '#888' : '#f87171',
-                     border: '1px solid #7f1d1d', borderRadius: 8, padding: '6px 14px',
-                     cursor: distilling ? 'not-allowed' : 'pointer', fontSize: 13, fontWeight: 600 }}>
-            {distilling ? '⏳ Distilling…' : '🧹 Distill & Clear'}
-          </button>
+          {isAdmin && (
+            <button onClick={handleDistill} disabled={distilling}
+              style={{ background: distilling ? '#3a1a2a' : '#4a0020', color: distilling ? '#888' : '#f87171',
+                       border: '1px solid #7f1d1d', borderRadius: 8, padding: '6px 14px',
+                       cursor: distilling ? 'not-allowed' : 'pointer', fontSize: 13, fontWeight: 600 }}>
+              {distilling ? '⏳ Distilling…' : '🧹 Distill & Clear'}
+            </button>
+          )}
         </div>
       </div>
 
