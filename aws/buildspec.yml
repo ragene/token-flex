@@ -24,18 +24,50 @@ phases:
       - echo Pushing image...
       - docker push $IMAGE:$IMAGE_TAG
       - docker push $IMAGE:latest
-      - echo Forcing ECS redeployment on token-flow-ui cluster...
+      - echo Patching task definition with secrets from SSM...
       - |
-        SVC_STATUS=$(aws ecs describe-services --cluster $ECS_CLUSTER --services $ECS_SERVICE \
-          --region $AWS_DEFAULT_REGION --query 'services[0].status' --output text 2>/dev/null || echo "MISSING")
-        if [ "$SVC_STATUS" = "ACTIVE" ]; then
-          aws ecs update-service --cluster $ECS_CLUSTER --service $ECS_SERVICE \
-            --force-new-deployment --region $AWS_DEFAULT_REGION
-          echo "✅ ECS redeployment triggered"
-        else
-          echo "❌ Service not ACTIVE ($SVC_STATUS)"
-          exit 1
-        fi
+        # Read secrets from SSM
+        _SECRET_KEY=$(aws ssm get-parameter --name /token-flow/secret_key --with-decryption \
+          --region $AWS_DEFAULT_REGION --query 'Parameter.Value' --output text 2>/dev/null || echo "")
+        _AUTH0_DOMAIN=$(aws ssm get-parameter --name /token-flow/auth0_domain \
+          --region $AWS_DEFAULT_REGION --query 'Parameter.Value' --output text 2>/dev/null || echo "")
+        _AUTH0_CLIENT=$(aws ssm get-parameter --name /token-flow/auth0_client_id \
+          --region $AWS_DEFAULT_REGION --query 'Parameter.Value' --output text 2>/dev/null || echo "")
+
+        # Fetch current task def
+        aws ecs describe-task-definition --task-definition $ECS_SERVICE \
+          --region $AWS_DEFAULT_REGION --query 'taskDefinition' --output json > /tmp/td.json
+
+        # Patch env vars + new image
+        python3 << 'PYEOF'
+        import json, os
+        with open('/tmp/td.json') as f:
+            td = json.load(f)
+        patches = {}
+        if os.environ.get('_SECRET_KEY'):  patches['SECRET_KEY']     = os.environ['_SECRET_KEY']
+        if os.environ.get('_AUTH0_DOMAIN'): patches['AUTH0_DOMAIN']  = os.environ['_AUTH0_DOMAIN']
+        if os.environ.get('_AUTH0_CLIENT'): patches['AUTH0_CLIENT_ID'] = os.environ['_AUTH0_CLIENT']
+        for c in td['containerDefinitions']:
+            if c['name'] == 'token-flow':
+                env = {e['name']: e['value'] for e in c.get('environment', [])}
+                env.update({k: v for k, v in patches.items() if v})
+                c['environment'] = [{'name': k, 'value': v} for k, v in env.items()]
+        for key in ['taskDefinitionArn','revision','status','requiresAttributes',
+                    'placementConstraints','compatibilities','registeredAt','registeredBy']:
+            td.pop(key, None)
+        with open('/tmp/td_patched.json', 'w') as f:
+            json.dump(td, f)
+        PYEOF
+
+        export _SECRET_KEY _AUTH0_DOMAIN _AUTH0_CLIENT
+        NEW_ARN=$(aws ecs register-task-definition --region $AWS_DEFAULT_REGION \
+          --cli-input-json file:///tmp/td_patched.json \
+          --query 'taskDefinition.taskDefinitionArn' --output text)
+        echo "✅ New task def: $NEW_ARN"
+
+        aws ecs update-service --cluster $ECS_CLUSTER --service $ECS_SERVICE \
+          --task-definition $NEW_ARN --region $AWS_DEFAULT_REGION > /dev/null
+        echo "✅ ECS redeployment triggered"
       - printf '[{"name":"token-flow","imageUri":"%s"}]' $IMAGE:$IMAGE_TAG > imagedefinitions.json
       - echo Done.
 
