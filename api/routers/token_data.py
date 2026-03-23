@@ -761,6 +761,24 @@ async def list_events(
         conn.close()
 
 
+# ── Cleared-at endpoint (read by local push_client to filter session events) ──
+
+@router.get("/token-data/cleared-at")
+async def get_cleared_at(request: Request, token_payload: Optional[dict] = Depends(verify_token)) -> dict:
+    """
+    Return the cleared_at timestamp for the requesting user from push_cache.
+    Used by the local push_client to exclude events before the last clear.
+    """
+    user_email = get_current_user_email(token_payload)
+    database_url: str = request.app.state.database_url
+    pushed = _load_push_cache(database_url)
+    if not pushed:
+        return {"cleared_at": None}
+    cleared_map = pushed.get("cleared_at") or {}
+    ts = cleared_map.get(user_email or "") or cleared_map.get("__all__")
+    return {"cleared_at": ts, "user_email": user_email}
+
+
 # ── Export endpoint ───────────────────────────────────────────────────────────
 
 @router.get("/token-data/export")
@@ -941,6 +959,17 @@ async def clear_token_usage(request: Request, token_payload: Optional[dict] = De
                 "grand_cost_usd":     round(sum(r["cost_usd"] for r in summary_rows_patched), 6),
             }
             cached["ts"] = datetime.utcnow().isoformat() + "Z"
+
+            # Store cleared_at timestamp per user so the local push loop knows
+            # to exclude session events before this point on its next push.
+            # cleared_at is a dict keyed by user_email (or "__all__" for admin clear).
+            _now_iso = datetime.utcnow().isoformat() + "Z"
+            cleared_map = cached.get("cleared_at") or {}
+            if user_email:
+                cleared_map[user_email] = _now_iso
+            else:
+                cleared_map["__all__"] = _now_iso
+            cached["cleared_at"] = cleared_map
 
             conn2 = _conn(request)
             try:

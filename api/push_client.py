@@ -191,7 +191,27 @@ def _build_token_data() -> dict:
 
 # ── Snapshot builder ──────────────────────────────────────────────────────────
 
-def _extract_session_usage(owner_email: Optional[str] = None) -> list:
+def _get_cleared_at(ui_url: Optional[str] = None) -> Optional[str]:
+    """
+    Fetch the cleared_at timestamp for the owner from the remote push_cache.
+    Returns an ISO timestamp string, or None if never cleared.
+    """
+    try:
+        base = (ui_url or os.environ.get("TOKEN_FLOW_UI_URL", _DEFAULT_UI_URL)).rstrip("/")
+        import urllib.request as _ur
+        req = _ur.Request(f"{base}/token-data/cleared-at")
+        tok = _get_push_token()
+        if tok:
+            req.add_header("Authorization", f"Bearer {tok}")
+        with _ur.urlopen(req, timeout=4) as r:
+            data = json.loads(r.read())
+            return data.get("cleared_at")
+    except Exception:
+        pass
+    return None
+
+
+def _extract_session_usage(owner_email: Optional[str] = None, after: Optional[str] = None) -> list:
     """
     Parse token usage records from the active OpenClaw session JSONL file.
     Returns a list of event dicts compatible with the token_usage schema.
@@ -232,6 +252,9 @@ def _extract_session_usage(owner_email: Optional[str] = None) -> list:
                         msg = obj.get("message") or {}
                         usage = msg.get("usage")
                         if usage and msg.get("role") == "assistant":
+                            ts = obj.get("timestamp", "")
+                            if after and ts and ts <= after:
+                                continue  # skip events before the clear timestamp
                             cost = (usage.get("cost") or {}).get("total")
                             events.append({
                                 "user_email":         owner_email or "",
@@ -308,7 +331,16 @@ def _build_snapshot(db_path: str) -> dict:
         # real AI cost/token data even without a Postgres token_usage table.
         if not events:
             owner_email = _get_owner_email()
-            session_events = _extract_session_usage(owner_email=owner_email)
+            # Respect cleared_at — only show events after the last clear timestamp
+            _cleared_map = {}
+            try:
+                _pc = c.execute("SELECT payload FROM push_cache WHERE id = 1").fetchone()
+                if _pc:
+                    _cleared_map = json.loads(_pc[0]).get("cleared_at") or {}
+            except Exception:
+                pass
+            _after = _cleared_map.get(owner_email or "") or _cleared_map.get("__all__")
+            session_events = _extract_session_usage(owner_email=owner_email, after=_after)
             if session_events:
                 events = session_events[-100:]  # latest 100
                 # Recompute summary from session events
