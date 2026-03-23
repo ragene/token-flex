@@ -134,6 +134,7 @@ switch ($Command) {
         $sessions   = if ($env:SESSIONS_DIR)     { $env:SESSIONS_DIR }    else { $DEFAULT_SESSIONS }
         $s3bucket   = if ($env:S3_BUCKET)        { $env:S3_BUCKET }       else { "smart-memory" }
         $ownerEmail = Resolve-OwnerEmail
+        $tfJwt      = Resolve-TfJwt
 
         $procEnv = @{
             ANTHROPIC_API_KEY  = $env:ANTHROPIC_API_KEY
@@ -147,6 +148,7 @@ switch ($Command) {
             AUTH0_CLIENT_ID    = "$($env:AUTH0_CLIENT_ID)"
             SECRET_KEY         = "$($env:SECRET_KEY)"
             TOKEN_FLOW_UI_URL  = "$($env:TOKEN_FLOW_UI_URL)"
+            TOKEN_FLOW_JWT     = "$tfJwt"
             OWNER_EMAIL        = "$ownerEmail"
             PYTHONUNBUFFERED   = "1"
             PYTHONIOENCODING   = "utf-8"
