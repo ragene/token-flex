@@ -17,15 +17,15 @@ api.interceptors.request.use(config => {
   return config
 })
 
-export const getHealth = () => api.get('/health').then(r => r.data)
-export const getTokens = () => api.get('/tokens').then(r => r.data)
-export const getCurrentSession = () => api.get('/session/current').then(r => r.data)
-export const getChunks = (params = {}) => api.get('/chunks', { params }).then(r => r.data)
-export const getSummaries = (params = {}) => api.get('/summaries', { params }).then(r => r.data)
-export const postSummarize = (body) => api.post('/summarize', body).then(r => r.data)
-export const postIngest = (body) => api.post('/ingest', body).then(r => r.data)
-export const postAutoIngest = () => api.post('/memory/ingest/auto').then(r => r.data)
-export const postMemoryQuery = (body) => api.post('/memory/query', body).then(r => r.data)
+export const getHealth = () => api.get('/api/health').then(r => r.data)
+export const getTokens = () => api.get('/api/tokens').then(r => r.data)
+export const getCurrentSession = () => api.get('/api/session/current').then(r => r.data)
+export const getChunks = (params = {}) => api.get('/api/chunks', { params }).then(r => r.data)
+export const getSummaries = (params = {}) => api.get('/api/summaries', { params }).then(r => r.data)
+export const postSummarize = (body) => api.post('/api/summarize', body).then(r => r.data)
+export const postIngest = (body) => api.post('/api/ingest', body).then(r => r.data)
+export const postAutoIngest = () => api.post('/api/memory/ingest/auto', {}).then(r => r.data)
+export const postMemoryQuery = (body) => api.post('/api/memory/query', body).then(r => r.data)
 
 // Token data REST endpoints (fallback / external callers)
 export const getTokenSummary   = ()       => api.get('/token-data/summary').then(r => r.data)
@@ -44,15 +44,25 @@ export const getTokenDataWsUrl = () => {
   return token ? `${base}?token=${encodeURIComponent(token)}` : base
 }
 
-// Local sessions admin
-export const getLocalSessions   = ()      => api.get('/token-data/sessions').then(r => r.data)
-export const distillSession     = (email) => api.post(`/token-data/sessions/${encodeURIComponent(email)}/distill`).then(r => r.data)
-export const clearSessionTokens = (email) => api.delete(`/token-data/sessions/${encodeURIComponent(email)}/clear`).then(r => r.data)
+/**
+ * Decode the stored JWT and return { sub, email, role, name } or null.
+ * No verification — just reads the payload for UI gating purposes.
+ */
+export function getCurrentUser() {
+  const token = localStorage.getItem('tf_token')
+  if (!token) return null
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1]))
+    return { sub: payload.sub, email: payload.email, role: payload.role, name: payload.name }
+  } catch {
+    return null
+  }
+}
 
 // Users management
-export const getUsers = () => api.get('/users/').then(r => r.data)
-export const patchUserRole = (id, role) => api.patch(`/users/${id}/role`, { role }).then(r => r.data)
-export const activateUser = (id) => api.patch(`/users/${id}/activate`).then(r => r.data)
-export const deactivateUser = (id) => api.patch(`/users/${id}/deactivate`).then(r => r.data)
-export const deleteUser = (id) => api.delete(`/users/${id}`).then(r => r.data)
-export const getMe = () => api.get('/users/me').then(r => r.data)
+export const getUsers = () => api.get('/api/users/').then(r => r.data)
+export const patchUserRole = (id, role) => api.patch(`/api/users/${id}/role`, { role }).then(r => r.data)
+export const activateUser = (id) => api.patch(`/api/users/${id}/activate`).then(r => r.data)
+export const deactivateUser = (id) => api.patch(`/api/users/${id}/deactivate`).then(r => r.data)
+export const deleteUser = (id) => api.delete(`/api/users/${id}`).then(r => r.data)
+export const getMe = () => api.get('/api/users/me').then(r => r.data)

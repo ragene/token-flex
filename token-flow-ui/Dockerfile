@@ -1,5 +1,5 @@
 # ── Build stage ────────────────────────────────────────────────────────────
-FROM public.ecr.aws/docker/library/node:20-alpine AS build
+FROM node:20-alpine AS build
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
@@ -7,7 +7,7 @@ COPY . .
 RUN npm run build
 
 # ── Runtime stage ──────────────────────────────────────────────────────────
-FROM public.ecr.aws/docker/library/node:20-alpine
+FROM node:20-alpine
 RUN npm install -g serve && apk add --no-cache curl
 WORKDIR /app
 COPY --from=build /app/dist ./dist

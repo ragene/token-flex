@@ -57,47 +57,59 @@ static_resources:
                             timeout: 30s
 
                         # Other API paths — all under /api/ prefix to avoid colliding with SPA routes
-                        - match: { prefix: "/ingest" }
+                        - match: { prefix: "/api/ingest" }
                           route:
                             cluster: token_flow_api
                             timeout: 60s
-                        - match: { prefix: "/chunks" }
+                            prefix_rewrite: "/ingest"
+                        - match: { prefix: "/api/chunks" }
                           route:
                             cluster: token_flow_api
                             timeout: 30s
-                        - match: { prefix: "/summaries" }
+                            prefix_rewrite: "/chunks"
+                        - match: { prefix: "/api/summaries" }
                           route:
                             cluster: token_flow_api
                             timeout: 30s
-                        - match: { prefix: "/summarize" }
+                            prefix_rewrite: "/summaries"
+                        - match: { prefix: "/api/summarize" }
                           route:
                             cluster: token_flow_api
                             timeout: 600s
-                        - match: { prefix: "/memory" }
+                            prefix_rewrite: "/summarize"
+                        - match: { prefix: "/api/memory" }
                           route:
                             cluster: token_flow_api
                             timeout: 600s
-                        - match: { prefix: "/tokens" }
+                            prefix_rewrite: "/memory"
+                        - match: { prefix: "/api/tokens" }
                           route:
                             cluster: token_flow_api
                             timeout: 30s
-                        - match: { prefix: "/session" }
+                            prefix_rewrite: "/tokens"
+                        - match: { prefix: "/api/session" }
                           route:
                             cluster: token_flow_api
                             timeout: 0s
-                        - match: { prefix: "/health" }
+                            prefix_rewrite: "/session"
+                        - match: { prefix: "/api/health" }
                           route:
                             cluster: token_flow_api
                             timeout: 10s
+                            prefix_rewrite: "/health"
+                        - match: { prefix: "/health" }
+                          route: { cluster: token_flow_api, timeout: 10s }
+                        # Auth0 callback must go to SPA (React handles it client-side)
                         - match: { prefix: "/auth/callback" }
                           route: { cluster: ui_app, timeout: 30s }
                         # All other /auth/* routes go to the API
                         - match: { prefix: "/auth/" }
                           route: { cluster: token_flow_api, timeout: 30s }
-                        - match: { prefix: "/users" }
+                        - match: { prefix: "/api/users" }
                           route:
                             cluster: token_flow_api
                             timeout: 30s
+                            prefix_rewrite: "/users"
 
                         # ── Static UI (SPA fallback) ──────────────────────────
                         - match: { prefix: "/" }
