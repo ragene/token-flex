@@ -267,6 +267,7 @@ def _build_snapshot(db_path: str) -> dict:
 
     return {
         "ts": datetime.utcnow().isoformat() + "Z",
+        "owner_email": _get_owner_email(),   # tags snapshot with local user identity
         "summary": {
             "rows": summary_rows,
             "grand_total_tokens": grand_tokens,
@@ -311,6 +312,48 @@ def log_pipeline_event(
 
 
 # ── Push helper ───────────────────────────────────────────────────────────────
+
+def _get_owner_email() -> Optional[str]:
+    """
+    Resolve the email of the authenticated local user (machine owner).
+    Used to tag push snapshots so the server can scope tokens/session display.
+
+    Priority:
+      1. OWNER_EMAIL env var (set by manage.sh / ECS task def)
+      2. Decoded from TOKEN_FLOW_JWT env var
+      3. Cached tf_auth.json user.email (device-flow login)
+    """
+    # 1. Explicit override
+    explicit = os.environ.get("OWNER_EMAIL", "").strip()
+    if explicit:
+        return explicit
+
+    # 2. Decode from TOKEN_FLOW_JWT
+    jwt_env = os.environ.get("TOKEN_FLOW_JWT", "").strip()
+    if jwt_env:
+        try:
+            import base64 as _b64
+            parts = jwt_env.split(".")
+            if len(parts) >= 2:
+                padded = parts[1] + "=" * (-len(parts[1]) % 4)
+                claim = json.loads(_b64.urlsafe_b64decode(padded))
+                if claim.get("email"):
+                    return claim["email"]
+        except Exception:
+            pass
+
+    # 3. Cached device-flow user info
+    try:
+        from api.device_auth import CACHE_PATH
+        data = json.loads(CACHE_PATH.read_text())
+        email = (data.get("user") or {}).get("email", "").strip()
+        if email:
+            return email
+    except Exception:
+        pass
+
+    return None
+
 
 def _get_push_token() -> Optional[str]:
     """
