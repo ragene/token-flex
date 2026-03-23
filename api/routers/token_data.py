@@ -337,24 +337,9 @@ def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict
 
         # push_cache tokens reflect the LOCAL machine owner's session files
         # (~/.openclaw/agents/main/sessions/).  A scoped (non-owner) user must
-        # never see those numbers — they would see the owner's token counts as
-        # if they were their own.  Return a neutral placeholder instead.
+        # never see those numbers.  Return None so the UI hides the section.
         _pushed_tokens = pushed.get("tokens") or {}
-        if user_email:
-            tokens = {
-                "total_tokens_approx": 0,
-                "session_tokens":      0,
-                "memory_tokens":       0,
-                "session_files":       0,
-                "status":              "ok",
-                "message":             "ℹ️ Local session data is only visible to the machine owner.",
-                "warn_threshold":      _pushed_tokens.get("warn_threshold", 30000),
-                "distill_threshold":   _pushed_tokens.get("distill_threshold", 30000),
-                "cached_chunks":       0,
-                "cached_chunk_tokens": 0,
-            }
-        else:
-            tokens = _pushed_tokens
+        tokens = None if user_email else _pushed_tokens
         # token_usage lives in local SQLite (not Postgres), so the DB queries above
         # return empty rows.  When the DB has no data, pull summary/events from the
         # push_cache snapshot sent by the local service — but only when no user filter
