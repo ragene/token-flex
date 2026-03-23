@@ -792,7 +792,7 @@ SQS_QUEUE_URL = os.environ.get(
 AWS_REGION = os.environ.get("AWS_REGION", "us-west-2")
 
 
-@router.post("/token-data/distill", status_code=202, dependencies=[Depends(require_role("admin"))])
+@router.post("/token-data/distill", status_code=202)
 async def trigger_distill(request: Request, token_payload: Optional[dict] = Depends(verify_token)) -> dict:
     """
     Publish a distill_and_clear message to the SQS queue.
@@ -846,7 +846,7 @@ async def trigger_distill(request: Request, token_payload: Optional[dict] = Depe
         raise HTTPException(status_code=502, detail=f"SQS error: {exc}")
 
 
-@router.delete("/token-data/clear", status_code=200, dependencies=[Depends(require_role("admin"))])
+@router.delete("/token-data/clear", status_code=200)
 async def clear_token_usage(request: Request, token_payload: Optional[dict] = Depends(verify_token)) -> dict:
     """
     Delete token_usage rows for the requesting user only.
