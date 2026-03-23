@@ -12,6 +12,7 @@ import Login from './pages/Login.jsx'
 import AuthCallback from './pages/AuthCallback.jsx'
 import Users from './pages/Users.jsx'
 import PendingAccess from './pages/PendingAccess.jsx'
+import { getCurrentUser } from './api.js'
 
 // Guard that checks for tf_token in localStorage
 function RequireAuth({ children }) {
@@ -19,6 +20,14 @@ function RequireAuth({ children }) {
   if (!token) {
     return <Navigate to="/login" replace />
   }
+  return children
+}
+
+// Guard that requires admin role — redirects non-admins to dashboard
+function RequireAdmin({ children }) {
+  const user = getCurrentUser()
+  if (!user) return <Navigate to="/login" replace />
+  if (user.role !== 'admin') return <Navigate to="/dashboard" replace />
   return children
 }
 
@@ -48,7 +57,7 @@ export default function App() {
           <Route path="chunks" element={<Chunks />} />
           <Route path="summaries" element={<Summaries />} />
           <Route path="ingest" element={<Ingest />} />
-          <Route path="users" element={<RequireAuth><Users /></RequireAuth>} />
+          <Route path="users" element={<RequireAdmin><Users /></RequireAdmin>} />
         </Route>
       </Routes>
     </BrowserRouter>

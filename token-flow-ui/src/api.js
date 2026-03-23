@@ -44,6 +44,21 @@ export const getTokenDataWsUrl = () => {
   return token ? `${base}?token=${encodeURIComponent(token)}` : base
 }
 
+/**
+ * Decode the stored JWT and return { sub, email, role, name } or null.
+ * No verification — just reads the payload for UI gating purposes.
+ */
+export function getCurrentUser() {
+  const token = localStorage.getItem('tf_token')
+  if (!token) return null
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1]))
+    return { sub: payload.sub, email: payload.email, role: payload.role, name: payload.name }
+  } catch {
+    return null
+  }
+}
+
 // Users management
 export const getUsers = () => api.get('/api/users/').then(r => r.data)
 export const patchUserRole = (id, role) => api.patch(`/api/users/${id}/role`, { role }).then(r => r.data)

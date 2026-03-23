@@ -1,6 +1,7 @@
 import React from 'react'
 import { Outlet, NavLink, useNavigate } from 'react-router-dom'
 import { useAuth0 } from '@auth0/auth0-react'
+import { getCurrentUser } from '../api.js'
 
 const SIDEBAR = '#1a1a2e'
 const ACCENT = '#e94560'
@@ -9,15 +10,15 @@ const domain = import.meta.env.VITE_AUTH0_DOMAIN
 const clientId = import.meta.env.VITE_AUTH0_CLIENT_ID
 const auth0Configured = !!(domain && clientId)
 
-const navItems = [
-  { to: '/dashboard',  label: '📊 Dashboard' },
-  { to: '/token-data', label: '🔢 Token Data' },
-  { to: '/memory',     label: '🧠 Memory' },
-  { to: '/activity',   label: '⚡ Activity' },
-  { to: '/chunks',     label: '🧩 Chunks' },
-  { to: '/summaries',  label: '📝 Summaries' },
-  { to: '/ingest',     label: '📥 Ingest' },
-  { to: '/users',      label: '👥 Users' },
+const ALL_NAV_ITEMS = [
+  { to: '/dashboard',  label: '📊 Dashboard',  roles: null },
+  { to: '/token-data', label: '🔢 Token Data',  roles: null },
+  { to: '/memory',     label: '🧠 Memory',      roles: null },
+  { to: '/activity',   label: '⚡ Activity',    roles: null },
+  { to: '/chunks',     label: '🧩 Chunks',      roles: null },
+  { to: '/summaries',  label: '📝 Summaries',   roles: null },
+  { to: '/ingest',     label: '📥 Ingest',      roles: null },
+  { to: '/users',      label: '👥 Users',       roles: ['admin'] },
 ]
 
 // Logout button — only rendered when Auth0Provider is present
@@ -71,6 +72,10 @@ function LogoutButton({ onClick }) {
 }
 
 export default function Layout() {
+  const currentUser = getCurrentUser()
+  const role = currentUser?.role || 'viewer'
+  const navItems = ALL_NAV_ITEMS.filter(item => !item.roles || item.roles.includes(role))
+
   return (
     <div style={{ display: 'flex', minHeight: '100vh' }}>
       {/* Sidebar */}
@@ -113,6 +118,17 @@ export default function Layout() {
           ))}
         </div>
         <div style={{ padding: '16px', borderTop: `1px solid ${ACCENT}22` }}>
+          {currentUser?.email && (
+            <div style={{ fontSize: 11, color: '#444', marginBottom: 8, wordBreak: 'break-all' }}>
+              {currentUser.email}
+              <span style={{
+                display: 'inline-block', marginLeft: 6, padding: '1px 6px',
+                borderRadius: 8, fontSize: 10, fontWeight: 700,
+                background: role === 'admin' ? `${ACCENT}33` : '#2a2a40',
+                color: role === 'admin' ? ACCENT : '#666',
+              }}>{role}</span>
+            </div>
+          )}
           {auth0Configured ? <Auth0LogoutButton /> : <PlainLogoutButton />}
           <div style={{ color: '#333', fontSize: 11, marginTop: 8, textAlign: 'center' }}>
             token-flow v0.1
