@@ -555,15 +555,11 @@ async def push_snapshot(body: PushSnapshotIn, request: Request) -> dict:
         conn = _conn(request)
         try:
             payload_json = _json.dumps(payload)
-            cur = conn.execute(
-                "UPDATE push_cache SET payload = ?, updated_at = NOW() WHERE id = 1",
+            conn.execute(
+                """INSERT INTO push_cache (id, payload, updated_at) VALUES (1, ?, NOW())
+                   ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()""",
                 (payload_json,),
             )
-            if cur.rowcount == 0:
-                conn.execute(
-                    "INSERT INTO push_cache (id, payload, updated_at) VALUES (1, ?, NOW())",
-                    (payload_json,),
-                )
             conn.commit()
         finally:
             conn.close()
@@ -824,15 +820,11 @@ async def clear_token_usage(request: Request, token_payload: Optional[dict] = De
             conn2 = _conn(request)
             try:
                 payload_json = _json.dumps(cached)
-                cur = conn2.execute(
-                    "UPDATE push_cache SET payload = ?, updated_at = NOW() WHERE id = 1",
+                conn2.execute(
+                    """INSERT INTO push_cache (id, payload, updated_at) VALUES (1, ?, NOW())
+                       ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()""",
                     (payload_json,),
                 )
-                if cur.rowcount == 0:
-                    conn2.execute(
-                        "INSERT INTO push_cache (id, payload, updated_at) VALUES (1, ?, NOW())",
-                        (payload_json,),
-                    )
                 conn2.commit()
             finally:
                 conn2.close()
