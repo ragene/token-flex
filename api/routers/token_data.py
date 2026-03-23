@@ -356,16 +356,15 @@ def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict
     session: dict = {"session_id": None, "token_count_approx": 0, "message_count": 0}
     pushed = _load_push_cache(database_url)
     if pushed:
-        # Session shell — will be enriched below only for the machine owner.
-        session = {"session_id": None, "token_count_approx": 0, "message_count": 0}
-
-        # push_cache tokens/session = local machine health data (session file sizes,
-        # memory token counts). Show to: the machine owner (user_email matches
-        # push_cache.owner_email) or unauthenticated/dev mode (no user_email).
-        # Remote viewers (different email) get None — UI hides the section.
+        # Determine if the requesting user is the machine owner.
         _owner_email = (pushed.get("owner_email") or "").strip()
         _is_owner = (not user_email) or (bool(_owner_email) and user_email == _owner_email)
-        tokens = (pushed.get("tokens") or {}) if _is_owner else None
+
+        # tokens/session = local machine data — show to owner only.
+        # Remote viewers get None so the UI hides the section.
+        tokens  = (pushed.get("tokens")  or {}) if _is_owner else None
+        session = (pushed.get("session") or {"session_id": None, "token_count_approx": 0, "message_count": 0}) if _is_owner \
+                  else {"session_id": None, "token_count_approx": 0, "message_count": 0}
         # token_usage lives in local SQLite (not Postgres), so the DB queries above
         # return empty rows.  When the DB has no data, pull summary/events from the
         # push_cache snapshot sent by the local service — but only when no user filter
