@@ -646,7 +646,7 @@ def run_distill_and_clear(args_ns, triggered_by: str = "unknown", auth_token: st
     # zero-summary payload directly so the UI blanks immediately without waiting
     # for the next 30-second push cycle.
     try:
-        from api.push_client import push_snapshot, _build_token_data, _build_session_data, _build_snapshot as _push_build_snapshot
+        from api.push_client import push_snapshot, _build_token_data, _build_session_data, _build_snapshot as _push_build_snapshot, _get_owner_email
         _db_url = (
             os.environ.get("DATABASE_URL", "").strip()
             or f"sqlite:///{os.environ.get('TOKEN_FLOW_DB', '/home/ec2-user/.openclaw/data/token_flow.db')}"
@@ -659,8 +659,31 @@ def run_distill_and_clear(args_ns, triggered_by: str = "unknown", auth_token: st
             _full_snap = _push_build_snapshot(_db_url)
         except Exception:
             _full_snap = {}
+
+        # Preserve the cleared_at map that was just set in step 4b so the next
+        # push cycle continues to filter events before the clear timestamp.
+        # Without this, push_cache gets overwritten and cleared_at is lost.
+        _existing_cleared_at = {}
+        try:
+            import urllib.request as _ureq2, json as _jc2
+            _remote_url2 = os.environ.get("TOKEN_FLOW_UI_URL", "").rstrip("/")
+            if _remote_url2 and auth_token:
+                _ca_req = _ureq2.Request(
+                    f"{_remote_url2}/token-data/cleared-at",
+                    headers={"Authorization": f"Bearer {auth_token}"},
+                )
+                with _ureq2.urlopen(_ca_req, timeout=4) as _r2:
+                    _existing_cleared_at = {user_email: _jc2.loads(_r2.read()).get("cleared_at")} if user_email else {}
+        except Exception:
+            pass
+
         _post_distill_payload = {
             "ts": _dt.utcnow().isoformat() + "Z",
+            # owner_email MUST be present so _build_snapshot()'s _is_owner check
+            # passes for authenticated users — without it, snap.tokens is set to
+            # None and the Dashboard's `if (snap.tokens) setData(snap.tokens)`
+            # guard skips the state update, leaving stale data on screen.
+            "owner_email": _get_owner_email() or triggered_by or "",
             "summary": {
                 "rows": [],
                 "grand_total_tokens": 0,
@@ -668,6 +691,8 @@ def run_distill_and_clear(args_ns, triggered_by: str = "unknown", auth_token: st
                 "grand_cost_usd": 0.0,
             },
             "events": [],
+            # Preserve cleared_at so the next push cycle keeps filtering stale events
+            "cleared_at": _existing_cleared_at,
             # Preserve chunks, memory_entries, pipeline_events from local DB
             "chunks":          _full_snap.get("chunks", []),
             "memory_entries":  _full_snap.get("memory_entries", []),
