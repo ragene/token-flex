@@ -341,7 +341,7 @@ async def full_cycle(body: FullCycleRequest, request: Request) -> FullCycleResul
         sessions_cleared = 0
         raw_file_chunks = 0
         pruned = 0
-        chunks_remaining = 0
+        chunks_remaining = conn.execute("SELECT COUNT(*) FROM chunk_cache").fetchone()[0]
         rebuilt_to: Optional[str] = None
 
         if not body.dry_run:
@@ -458,7 +458,7 @@ async def full_cycle(body: FullCycleRequest, request: Request) -> FullCycleResul
         md_files_cleared=md_cleared,
         session_files_cleared=sessions_cleared,
         chunks_pruned=pruned if not body.dry_run and safety_passed else 0,
-        chunks_remaining=chunks_remaining if not body.dry_run and safety_passed else total_chunks,
+        chunks_remaining=chunks_remaining,
         rebuilt_to=rebuilt_to,
     )
 
