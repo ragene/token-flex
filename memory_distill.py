@@ -855,14 +855,48 @@ def poll_sqs(args_ns):
                 continue
 
             if action == "distill_and_clear":
-                print(f"[SQS poller] Starting distill+clear (triggered by {triggered_by}, scope={msg_user_email or 'all'})...")
+                # Full distill + token clear — only safe when triggered by the machine owner
+                # (msg_user_email is None/empty for admin/unauthenticated requests).
+                # Scoped users send "clear_tokens_only" instead; if somehow a
+                # distill_and_clear arrives with a non-empty user_email it means it
+                # was sent by an older client — treat it as clear_tokens_only to be safe.
+                if msg_user_email:
+                    print(f"[SQS poller] ⚠️  distill_and_clear received with user_email={msg_user_email} — "
+                          f"downgrading to clear_tokens_only to protect owner memory files")
+                    action = "clear_tokens_only"
+                else:
+                    print(f"[SQS poller] Starting distill+clear (triggered by {triggered_by}, scope=all)...")
+                    try:
+                        run_distill_and_clear(args_ns, triggered_by=triggered_by,
+                                              auth_token=startup_token,
+                                              user_email=None)
+                        print("[SQS poller] ✅ distill+clear complete")
+                    except Exception as e:
+                        print(f"[SQS poller] ⚠️  distill+clear failed: {e}")
+
+            if action == "clear_tokens_only":
+                # Scoped user clear: wipe only their token_usage rows, skip memory distill.
+                print(f"[SQS poller] Clearing token_usage rows for user_email={msg_user_email or 'all'} (no memory distill)...")
                 try:
-                    run_distill_and_clear(args_ns, triggered_by=triggered_by,
-                                          auth_token=startup_token,
-                                          user_email=msg_user_email)
-                    print("[SQS poller] ✅ distill+clear complete")
+                    import sqlite3 as _sqlite3
+                    _local_db = str(getattr(args_ns, 'db', None) or
+                                    os.environ.get("TOKEN_FLOW_DB",
+                                                   "/home/ec2-user/.openclaw/data/token_flow.db"))
+                    _conn = _sqlite3.connect(_local_db)
+                    if msg_user_email:
+                        _count = _conn.execute(
+                            "SELECT COUNT(*) FROM token_usage WHERE user_email = ?",
+                            (msg_user_email,)
+                        ).fetchone()[0]
+                        _conn.execute("DELETE FROM token_usage WHERE user_email = ?", (msg_user_email,))
+                    else:
+                        _count = _conn.execute("SELECT COUNT(*) FROM token_usage").fetchone()[0]
+                        _conn.execute("DELETE FROM token_usage")
+                    _conn.commit()
+                    _conn.close()
+                    print(f"[SQS poller] ✅ Deleted {_count} token_usage rows (scope={msg_user_email or 'all'})")
                 except Exception as e:
-                    print(f"[SQS poller] ⚠️  distill+clear failed: {e}")
+                    print(f"[SQS poller] ⚠️  clear_tokens_only failed: {e}")
 
             sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt)
 

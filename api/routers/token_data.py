@@ -329,12 +329,32 @@ def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict
     session: dict = {"session_id": None, "token_count_approx": 0, "message_count": 0}
     pushed = _load_push_cache(database_url)
     if pushed:
-        tokens = pushed.get("tokens") or {}
         # Never copy push_cache session wholesale — it contains the local machine
         # owner's identity. Rebuild a clean empty session shell for every user;
         # the real session data comes from the user-scoped _build_tokens_and_session
         # call in the else branch (when there is no push_cache).
         session = {"session_id": None, "token_count_approx": 0, "message_count": 0}
+
+        # push_cache tokens reflect the LOCAL machine owner's session files
+        # (~/.openclaw/agents/main/sessions/).  A scoped (non-owner) user must
+        # never see those numbers — they would see the owner's token counts as
+        # if they were their own.  Return a neutral placeholder instead.
+        _pushed_tokens = pushed.get("tokens") or {}
+        if user_email:
+            tokens = {
+                "total_tokens_approx": 0,
+                "session_tokens":      0,
+                "memory_tokens":       0,
+                "session_files":       0,
+                "status":              "ok",
+                "message":             "ℹ️ Local session data is only visible to the machine owner.",
+                "warn_threshold":      _pushed_tokens.get("warn_threshold", 30000),
+                "distill_threshold":   _pushed_tokens.get("distill_threshold", 30000),
+                "cached_chunks":       0,
+                "cached_chunk_tokens": 0,
+            }
+        else:
+            tokens = _pushed_tokens
         # token_usage lives in local SQLite (not Postgres), so the DB queries above
         # return empty rows.  When the DB has no data, pull summary/events from the
         # push_cache snapshot sent by the local service — but only when no user filter
@@ -764,6 +784,12 @@ async def trigger_distill(request: Request, token_payload: Optional[dict] = Depe
     Publish a distill_and_clear message to the SQS queue.
     The local smart-memory service polls this queue and runs memory_distill.py full + clears token_usage.
     user_email is extracted from the JWT so the clear only affects the triggering user's rows.
+
+    SECURITY: scoped (non-owner) users can only clear their own token_usage rows.
+    The SQS message action is set to "clear_tokens_only" so the poller skips the
+    local memory distillation step (which would rewrite the machine owner's files).
+    Only the machine owner (no user_email, i.e. admin / unauthenticated mode) may
+    trigger a full distill_and_clear that also rewrites memory on disk.
     """
     user_email = get_current_user_email(token_payload)
 
@@ -774,11 +800,15 @@ async def trigger_distill(request: Request, token_payload: Optional[dict] = Depe
         pass
     # triggered_by falls back to the JWT email so attribution is always accurate
     triggered_by = (body.get("triggered_by") or user_email or "unknown").strip()
+
+    # Scoped users can only clear their own token_usage rows — not the owner's memory.
+    action = "distill_and_clear" if not user_email else "clear_tokens_only"
+
     try:
         import boto3
         sqs = boto3.client("sqs", region_name=AWS_REGION)
         message = {
-            "action": "distill_and_clear",
+            "action": action,
             "requested_at": datetime.utcnow().isoformat(),
             "triggered_by": triggered_by,
             "user_email": user_email,   # scopes the token_usage DELETE to this user
@@ -787,9 +817,10 @@ async def trigger_distill(request: Request, token_payload: Optional[dict] = Depe
             QueueUrl=SQS_QUEUE_URL,
             MessageBody=_json.dumps(message),
         )
-        log.info("Distill trigger sent to SQS by %s (MessageId=%s)", triggered_by, resp.get("MessageId"))
+        log.info("Distill trigger sent to SQS by %s action=%s (MessageId=%s)", triggered_by, action, resp.get("MessageId"))
         return {
             "status": "queued",
+            "action": action,
             "message_id": resp.get("MessageId"),
             "requested_at": message["requested_at"],
             "triggered_by": triggered_by,
