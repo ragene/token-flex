@@ -45,18 +45,85 @@ else
   echo "  ⏭  Skipping build (--skip-build)"
 fi
 
-# ── 3. Force new deployment on token-flow-ui service ─────────────────────────
+# ── 3. Patch task definition with required env vars ───────────────────────────
+# Read secrets from .env (same dir as this script's parent) so they are
+# never hardcoded in source but always applied on every deploy.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ENV_FILE="$SCRIPT_DIR/../.env"
+
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "❌ .env not found at $ENV_FILE — cannot inject secrets into task definition"
+  exit 1
+fi
+
+# Source only the vars we need (avoid polluting the shell with everything)
+_AUTH0_DOMAIN=$(grep   '^AUTH0_DOMAIN='   "$ENV_FILE" | cut -d= -f2-)
+_AUTH0_CLIENT=$(grep   '^AUTH0_CLIENT_ID=' "$ENV_FILE" | cut -d= -f2-)
+_SECRET_KEY=$(grep     '^SECRET_KEY='     "$ENV_FILE" | cut -d= -f2-)
+
+if [[ -z "$_AUTH0_DOMAIN" || -z "$_SECRET_KEY" ]]; then
+  echo "❌ AUTH0_DOMAIN or SECRET_KEY missing from .env"
+  exit 1
+fi
+
 echo ""
-echo "🚀 Forcing new deployment on $CLUSTER/$SERVICE..."
+echo "🔐 Patching task definition with AUTH0 + SECRET_KEY env vars..."
+
+# Fetch current task def, patch the token-flow container env, register new revision
+_TD_FILE=$(mktemp /tmp/tf-taskdef-XXXXXX.json)
+_TD_PATCHED=$(mktemp /tmp/tf-taskdef-patched-XXXXXX.json)
+trap "rm -f $_TD_FILE $_TD_PATCHED" EXIT
+
+aws ecs describe-task-definition \
+  --task-definition "$SERVICE" --region "$REGION" \
+  --query 'taskDefinition' --output json > "$_TD_FILE"
+
+python3 << PYEOF
+import json
+
+with open("$_TD_FILE") as f:
+    td = json.load(f)
+
+patches = {
+    "AUTH0_DOMAIN":    "$_AUTH0_DOMAIN",
+    "AUTH0_CLIENT_ID": "$_AUTH0_CLIENT",
+    "SECRET_KEY":      "$_SECRET_KEY",
+}
+
+for c in td["containerDefinitions"]:
+    if c["name"] == "token-flow":
+        env = {e["name"]: e["value"] for e in c.get("environment", [])}
+        env.update(patches)
+        c["environment"] = [{"name": k, "value": v} for k, v in env.items()]
+
+# Strip read-only fields before re-registering
+for key in ["taskDefinitionArn","revision","status","requiresAttributes",
+            "placementConstraints","compatibilities","registeredAt","registeredBy"]:
+    td.pop(key, None)
+
+with open("$_TD_PATCHED", "w") as f:
+    json.dump(td, f)
+PYEOF
+
+NEW_ARN=$(aws ecs register-task-definition \
+  --region "$REGION" \
+  --cli-input-json "file://$_TD_PATCHED" \
+  --query 'taskDefinition.taskDefinitionArn' --output text)
+echo "  ✓ New task def: $NEW_ARN"
+
+# ── 4. Deploy new task definition ─────────────────────────────────────────────
+echo ""
+echo "🚀 Deploying $NEW_ARN to $CLUSTER/$SERVICE..."
 aws ecs update-service \
   --cluster $CLUSTER \
   --service $SERVICE \
+  --task-definition "$NEW_ARN" \
   --force-new-deployment \
   --region $REGION \
   --query 'service.{Status:status,Desired:desiredCount}' \
   --output table
 
-# ── 4. Wait for stable ───────────────────────────────────────────────────────
+# ── 5. Wait for stable ───────────────────────────────────────────────────────
 echo ""
 echo "⏳ Waiting for service to stabilize (this may take 2-4 min)..."
 aws ecs wait services-stable --cluster $CLUSTER --services $SERVICE --region $REGION
