@@ -218,9 +218,11 @@ def _build_snapshot(db_path: str) -> dict:
         """).fetchall()
         chunks = [dict(r) for r in chunk_rows]
 
-        # Latest 100 token events
+        # Latest 100 token events — always include user_email so server-side
+        # per-user filtering works correctly when the snapshot is served from
+        # push_cache to multiple authenticated users.
         event_rows = c.execute("""
-            SELECT id, user_email, operation, model,
+            SELECT id, COALESCE(user_email, '') as user_email, operation, model,
                    prompt_tokens, completion_tokens, total_tokens,
                    cost_usd, source_label, created_at
             FROM token_usage

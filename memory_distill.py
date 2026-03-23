@@ -615,14 +615,24 @@ def run_distill_and_clear(args_ns, triggered_by: str = "unknown", auth_token: st
 
     if auth_token:
         try:
-            import urllib.request
+            import urllib.request as _ureq
+            import json as _json_inner
             print("  🔐 Clearing remote token_usage via API (pre-acquired token)...")
-            req = urllib.request.Request(
+            # Pass scoped_user_email in the body so the server clears only the
+            # triggering user's rows even when auth_token belongs to a service account.
+            _clear_body = _json_inner.dumps(
+                {"scoped_user_email": user_email} if user_email else {}
+            ).encode()
+            req = _ureq.Request(
                 f"{api_url}/token-data/clear",
+                data=_clear_body,
                 method="DELETE",
-                headers={"Authorization": f"Bearer {auth_token}"},
+                headers={
+                    "Authorization": f"Bearer {auth_token}",
+                    "Content-Type": "application/json",
+                },
             )
-            with urllib.request.urlopen(req, timeout=10) as r:
+            with _ureq.urlopen(req, timeout=10) as r:
                 body = r.read().decode()
                 print(f"  ✅ Remote token_usage cleared via API: {body}")
             _cleared_via_api = True

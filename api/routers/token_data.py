@@ -323,13 +323,18 @@ def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict
 
     # Pull tokens/session/memory/pipeline from push_cache first (has real local data).
     # Fall back to building from local files (works when running the service locally).
+    # Initialise tokens/session to safe defaults before the if/else so they are always
+    # defined even if push_cache is empty and _build_tokens_and_session isn't called.
+    tokens: dict = {}
+    session: dict = {"session_id": None, "token_count_approx": 0, "message_count": 0}
     pushed = _load_push_cache(database_url)
     if pushed:
         tokens = pushed.get("tokens") or {}
         # Never copy push_cache session wholesale — it contains the local machine
-        # owner's identity. Always use the per-user session built above, or an
-        # empty shell for users with no local session record.
-        session = session  # keep the user-scoped session built above
+        # owner's identity. Rebuild a clean empty session shell for every user;
+        # the real session data comes from the user-scoped _build_tokens_and_session
+        # call in the else branch (when there is no push_cache).
+        session = {"session_id": None, "token_count_approx": 0, "message_count": 0}
         # token_usage lives in local SQLite (not Postgres), so the DB queries above
         # return empty rows.  When the DB has no data, pull summary/events from the
         # push_cache snapshot sent by the local service — but only when no user filter
@@ -343,12 +348,15 @@ def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict
         if not events and pushed.get("events"):
             cached_events = pushed["events"]
             if user_email:
-                # Include rows explicitly tagged to this user OR rows with no
-                # user_email (unattributed — recorded by the local service which
-                # has no auth context; they belong to whoever owns the machine).
+                # Only include rows explicitly tagged to this user.
+                # Rows with a blank/null user_email are genuinely unattributed
+                # (old records before user tracking was added) — include them
+                # only if they are the ONLY user connected, i.e. single-user mode.
+                # In multi-user deployments, unattributed rows are ambiguous and
+                # must not be assigned to a random authenticated user.
                 events = [
                     e for e in cached_events
-                    if not e.get("user_email") or e.get("user_email") == user_email
+                    if e.get("user_email") == user_email
                 ]
             else:
                 events = cached_events
@@ -798,9 +806,26 @@ async def clear_token_usage(request: Request, token_payload: Optional[dict] = De
     """
     Delete token_usage rows for the requesting user only.
     Called by the local service after distillation completes, or manually from the dashboard.
-    Scoped to user_email from the JWT — never clears another user's data.
+
+    Scoping logic (first match wins):
+      1. ``scoped_user_email`` in the JSON request body — used by the SQS poller
+         which authenticates with a service JWT but wants to clear a specific user's rows.
+      2. ``user_email`` from the JWT payload — used by browser clients.
+      3. None → clears all rows (dev mode / no auth).
+
+    A service JWT (shared TOKEN_FLOW_AUTH_TOKEN) returns token_payload=None from
+    verify_token, so without body param #1 it would clear ALL rows.  Always pass
+    ``scoped_user_email`` from the poller to avoid that.
     """
-    user_email = get_current_user_email(token_payload)
+    # Try to pull scoped_user_email from body (poller path)
+    scoped_user_email: Optional[str] = None
+    try:
+        body = await request.json()
+        scoped_user_email = (body.get("scoped_user_email") or "").strip() or None
+    except Exception:
+        pass
+
+    user_email = scoped_user_email or get_current_user_email(token_payload)
     database_url: str = request.app.state.database_url
     conn = _conn(request)
 
