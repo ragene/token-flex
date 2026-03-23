@@ -704,19 +704,22 @@ SQS_QUEUE_URL = os.environ.get(
 AWS_REGION = os.environ.get("AWS_REGION", "us-west-2")
 
 
-@router.post("/token-data/distill", status_code=202, dependencies=[Depends(verify_token)])
-async def trigger_distill(request: Request) -> dict:
+@router.post("/token-data/distill", status_code=202)
+async def trigger_distill(request: Request, token_payload: Optional[dict] = Depends(verify_token)) -> dict:
     """
     Publish a distill_and_clear message to the SQS queue.
     The local smart-memory service polls this queue and runs memory_distill.py full + clears token_usage.
-    Accepts optional { "triggered_by": "name or email" } in the request body for attribution.
+    user_email is extracted from the JWT so the clear only affects the triggering user's rows.
     """
+    user_email = get_current_user_email(token_payload)
+
     body = {}
     try:
         body = await request.json()
     except Exception:
         pass
-    triggered_by = (body.get("triggered_by") or "").strip() or "unknown"
+    # triggered_by falls back to the JWT email so attribution is always accurate
+    triggered_by = (body.get("triggered_by") or user_email or "unknown").strip()
     try:
         import boto3
         sqs = boto3.client("sqs", region_name=AWS_REGION)
@@ -724,6 +727,7 @@ async def trigger_distill(request: Request) -> dict:
             "action": "distill_and_clear",
             "requested_at": datetime.utcnow().isoformat(),
             "triggered_by": triggered_by,
+            "user_email": user_email,   # scopes the token_usage DELETE to this user
         }
         resp = sqs.send_message(
             QueueUrl=SQS_QUEUE_URL,
@@ -735,6 +739,7 @@ async def trigger_distill(request: Request) -> dict:
             "message_id": resp.get("MessageId"),
             "requested_at": message["requested_at"],
             "triggered_by": triggered_by,
+            "user_email": user_email,
         }
     except Exception as exc:
         log.error("SQS send_message failed: %s", exc)
@@ -742,17 +747,23 @@ async def trigger_distill(request: Request) -> dict:
         raise HTTPException(status_code=502, detail=f"SQS error: {exc}")
 
 
-@router.delete("/token-data/clear", status_code=200, dependencies=[Depends(verify_token)])
-async def clear_token_usage(request: Request) -> dict:
+@router.delete("/token-data/clear", status_code=200)
+async def clear_token_usage(request: Request, token_payload: Optional[dict] = Depends(verify_token)) -> dict:
     """
-    Delete all token_usage rows. Called by the local service after distillation completes,
-    or manually from the dashboard.
+    Delete token_usage rows for the requesting user only.
+    Called by the local service after distillation completes, or manually from the dashboard.
+    Scoped to user_email from the JWT — never clears another user's data.
     """
+    user_email = get_current_user_email(token_payload)
     database_url: str = request.app.state.database_url
     conn = _conn(request)
+
+    email_filter = "WHERE user_email = ?" if user_email else ""
+    email_params = (user_email,) if user_email else ()
+
     try:
-        count = conn.execute("SELECT COUNT(*) FROM token_usage").fetchone()[0]
-        conn.execute("DELETE FROM token_usage")
+        count = conn.execute(f"SELECT COUNT(*) FROM token_usage {email_filter}", email_params).fetchone()[0]
+        conn.execute(f"DELETE FROM token_usage {email_filter}", email_params)
         conn.commit()
         log.info("Cleared %d token_usage rows", count)
     finally:

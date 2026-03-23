@@ -502,20 +502,23 @@ def _find_claude_cli_sessions() -> list:
     return unique
 
 
-def run_distill_and_clear(args_ns, triggered_by: str = "unknown", auth_token: str = None):
+def run_distill_and_clear(args_ns, triggered_by: str = "unknown", auth_token: str = None, user_email: str = None):
     """
     Run a full ingest+rebuild cycle then clear session files and token_usage.
     Called by the SQS poller on each trigger message.
 
     Args:
-        triggered_by: email of the user who initiated the distill (from SQS payload).
+        triggered_by: display label of the user who initiated the distill (from SQS payload).
         auth_token:   pre-acquired JWT to use for the /token-data/clear call.
                       If None, falls back to get_auth_headers() then direct DB clear.
+        user_email:   email of the triggering user — scopes the token_usage DELETE so
+                      only that user's rows are cleared. If None, falls back to all rows
+                      (legacy behaviour for unauthenticated / admin triggers).
     """
     import subprocess, sys, shutil
     from datetime import datetime as _dt
 
-    print(f"  Triggered by: {triggered_by}")
+    print(f"  Triggered by: {triggered_by} (user_email={user_email or 'all'})")
 
     # ── 1. Distill memory ────────────────────────────────────────────────────
     cmd = [sys.executable, __file__, "full",
@@ -587,12 +590,16 @@ def run_distill_and_clear(args_ns, triggered_by: str = "unknown", auth_token: st
     # ── 4a. Always clear local SQLite ────────────────────────────────────────
     _local_db = os.environ.get("TOKEN_FLOW_DB", "/home/ec2-user/.openclaw/data/token_flow.db")
     _local_db_url = f"sqlite:///{_local_db}" if not _local_db.startswith("sqlite") else _local_db
-    print(f"  🗄️  Clearing local token_usage (SQLite: {_local_db})...")
+    # Build user-scoped SQL fragments used in all clear paths below
+    _email_filter = "WHERE user_email = ?" if user_email else ""
+    _email_params = (user_email,) if user_email else ()
+
+    print(f"  🗄️  Clearing local token_usage (SQLite: {_local_db}, scope={user_email or 'all'})...")
     try:
         import sqlite3 as _sqlite3
         _lc = _sqlite3.connect(_local_db_url.replace("sqlite:///", ""))
-        _lcount = _lc.execute("SELECT COUNT(*) FROM token_usage").fetchone()[0]
-        _lc.execute("DELETE FROM token_usage")
+        _lcount = _lc.execute(f"SELECT COUNT(*) FROM token_usage {_email_filter}", _email_params).fetchone()[0]
+        _lc.execute(f"DELETE FROM token_usage {_email_filter}", _email_params)
         _lc.commit()
         _lc.close()
         print(f"  ✅ Deleted {_lcount} local token_usage rows from SQLite")
@@ -600,6 +607,8 @@ def run_distill_and_clear(args_ns, triggered_by: str = "unknown", auth_token: st
         print(f"  ⚠️  Local SQLite clear failed: {e}")
 
     # ── 4b. Also clear remote ECS Postgres via API (best-effort) ─────────────
+    # The API /token-data/clear endpoint is now JWT-scoped, so passing the
+    # auth_token is sufficient — the server will scope the DELETE to that user.
     _remote_url = os.environ.get("TOKEN_FLOW_UI_URL", "").rstrip("/")
     api_url = _remote_url or os.environ.get("TOKEN_FLOW_API_URL", "http://localhost:8001")
     _cleared_via_api = False
@@ -625,24 +634,24 @@ def run_distill_and_clear(args_ns, triggered_by: str = "unknown", auth_token: st
         db_url = os.environ.get("DATABASE_URL", "")
 
         if db_url and db_url.startswith("postgresql"):
-            # Direct Postgres clear — works when DATABASE_URL is set (ECS env)
+            # Direct Postgres clear — scoped to user_email when provided
             print("  🗄️  Clearing remote token_usage directly via DATABASE_URL...")
             try:
                 import psycopg2
                 conn_str = db_url.replace("postgresql+psycopg2://", "postgresql://")
                 conn_db = psycopg2.connect(conn_str)
                 cur = conn_db.cursor()
-                cur.execute("SELECT COUNT(*) FROM token_usage")
+                cur.execute(f"SELECT COUNT(*) FROM token_usage {_email_filter}", _email_params)
                 count = cur.fetchone()[0]
-                cur.execute("DELETE FROM token_usage")
+                cur.execute(f"DELETE FROM token_usage {_email_filter}", _email_params)
                 conn_db.commit()
                 cur.close()
                 conn_db.close()
-                print(f"  ✅ Deleted {count} remote token_usage rows from Postgres")
+                print(f"  ✅ Deleted {count} remote token_usage rows from Postgres (scope={user_email or 'all'})")
             except Exception as e:
                 print(f"  ⚠️  Direct Postgres clear failed: {e}")
         elif not _skip_auth:
-            # Last resort: try device flow auth + API call
+            # Last resort: device flow auth + API call (server will scope via JWT)
             try:
                 import urllib.request
                 from api.device_auth import get_auth_headers
@@ -828,17 +837,19 @@ def poll_sqs(args_ns):
                 body = json.loads(msg["Body"])
                 action       = body.get("action", "")
                 triggered_by = body.get("triggered_by", "unknown")
-                print(f"[SQS poller] Received: action={action} triggered_by={triggered_by} at {body.get('requested_at','?')}")
+                msg_user_email = body.get("user_email")   # scopes the token_usage DELETE
+                print(f"[SQS poller] Received: action={action} triggered_by={triggered_by} user_email={msg_user_email or 'all'} at {body.get('requested_at','?')}")
             except Exception as e:
                 print(f"[SQS poller] Bad message body: {e} — deleting")
                 sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt)
                 continue
 
             if action == "distill_and_clear":
-                print(f"[SQS poller] Starting distill+clear (triggered by {triggered_by})...")
+                print(f"[SQS poller] Starting distill+clear (triggered by {triggered_by}, scope={msg_user_email or 'all'})...")
                 try:
                     run_distill_and_clear(args_ns, triggered_by=triggered_by,
-                                          auth_token=startup_token)
+                                          auth_token=startup_token,
+                                          user_email=msg_user_email)
                     print("[SQS poller] ✅ distill+clear complete")
                 except Exception as e:
                     print(f"[SQS poller] ⚠️  distill+clear failed: {e}")
