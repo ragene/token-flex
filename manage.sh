@@ -65,6 +65,20 @@ _pid_on_port() {
   echo "$pid"
 }
 
+# Load cached internal JWT from tf_auth.json (used for authenticated push/record calls)
+_load_tf_jwt() {
+  python3 -c "
+import json, pathlib, time
+p = pathlib.Path('${DEFAULT_TF_AUTH}').expanduser()
+try:
+    d = json.loads(p.read_text())
+    if time.time() < d.get('expires_at', 0) - 60:
+        print(d['token'])
+except Exception:
+    pass
+" 2>/dev/null || true
+}
+
 # Resolve owner email from tf_auth.json cache (used to tag push snapshots)
 _resolve_owner_email() {
   python3 -c "
@@ -159,7 +173,7 @@ case "$cmd" in
       "AUTH0_CLIENT_ID=${AUTH0_CLIENT_ID:-}"
       "SECRET_KEY=${SECRET_KEY:-}"
       "TOKEN_FLOW_UI_URL=${TOKEN_FLOW_UI_URL:-}"
-      "TOKEN_FLOW_AUTH_TOKEN=${TOKEN_FLOW_AUTH_TOKEN:-}"
+      "TOKEN_FLOW_JWT=$(_load_tf_jwt)"
       "OWNER_EMAIL=${_OWNER_EMAIL}"
     )
 
