@@ -64,3 +64,33 @@ def get_current_user_email(token_payload: Optional[dict]) -> Optional[str]:
     if token_payload is None:
         return None  # dev mode — no filtering
     return token_payload.get("email")
+
+
+def require_role(*allowed_roles: str):
+    """
+    FastAPI dependency factory: raises 403 if the authenticated user's role
+    is not in allowed_roles. None payload (dev mode / no auth) always passes.
+
+    Usage:
+        @router.post("/foo", dependencies=[Depends(require_role("admin", "owner"))])
+        @router.post("/bar", dependencies=[Depends(require_role("admin"))])
+    """
+    def _check(credentials: HTTPAuthorizationCredentials = Security(security)) -> None:
+        if not AUTH0_DOMAIN:
+            return  # dev mode passthrough
+        if not credentials:
+            raise HTTPException(status_code=401, detail="Authorization required")
+        raw = credentials.credentials
+        if _SHARED_TOKEN and raw == _SHARED_TOKEN:
+            return  # service account — always allowed
+        try:
+            payload = decode_token(raw)
+        except HTTPException:
+            raise
+        role = payload.get("role", "")
+        if role not in allowed_roles:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Role '{role}' is not permitted. Required: {list(allowed_roles)}"
+            )
+    return _check

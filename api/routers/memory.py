@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from api.auth import verify_token
+from api.auth import verify_token, require_role
 from pydantic import BaseModel
 
 from db.schema import init_db
@@ -35,6 +35,7 @@ from engine.ingestor import (
     _run_chunk_pipeline_raw,
 )
 
+_admin_only = [Depends(verify_token), Depends(require_role("admin"))]
 router = APIRouter(tags=["memory"], dependencies=[Depends(verify_token)])
 
 
@@ -173,7 +174,7 @@ class RebuildResult(BaseModel):
 # Endpoints
 # ---------------------------------------------------------------------------
 
-@router.post("/memory/ingest/file", response_model=IngestResult)
+@router.post("/memory/ingest/file", dependencies=_admin_only, response_model=IngestResult)
 async def ingest_file(body: IngestFileRequest, request: Request) -> IngestResult:
     filepath = Path(body.path)
     if not filepath.exists():
@@ -194,7 +195,7 @@ async def ingest_file(body: IngestFileRequest, request: Request) -> IngestResult
     return IngestResult(ingested=ingested, chunks_created=chunks)
 
 
-@router.post("/memory/ingest/git", response_model=IngestResult)
+@router.post("/memory/ingest/git", dependencies=_admin_only, response_model=IngestResult)
 async def ingest_git(body: IngestGitRequest, request: Request) -> IngestResult:
     workspace = Path(body.workspace)
     if not workspace.exists():
@@ -214,7 +215,7 @@ async def ingest_git(body: IngestGitRequest, request: Request) -> IngestResult:
     return IngestResult(ingested=ingested, chunks_created=chunks)
 
 
-@router.post("/memory/ingest/session", response_model=IngestResult)
+@router.post("/memory/ingest/session", dependencies=_admin_only, response_model=IngestResult)
 async def ingest_session(body: IngestSessionRequest, request: Request) -> IngestResult:
     filepath = Path(body.path)
     if not filepath.exists():
@@ -232,7 +233,7 @@ async def ingest_session(body: IngestSessionRequest, request: Request) -> Ingest
     return IngestResult(ingested=ingested, chunks_created=chunks)
 
 
-@router.post("/memory/ingest/auto", response_model=IngestAutoResult)
+@router.post("/memory/ingest/auto", dependencies=_admin_only, response_model=IngestAutoResult)
 async def ingest_auto(body: IngestAutoRequest, request: Request) -> IngestAutoResult:
     """Auto-ingest all md files, git history, and Claude CLI sessions."""
     memory_dir = Path(os.environ.get("MEMORY_DIR", _DEFAULT_MEMORY_DIR))
@@ -279,7 +280,7 @@ async def ingest_auto(body: IngestAutoRequest, request: Request) -> IngestAutoRe
     return result
 
 
-@router.post("/memory/full", response_model=FullCycleResult)
+@router.post("/memory/full", dependencies=_admin_only, response_model=FullCycleResult)
 async def full_cycle(body: FullCycleRequest, request: Request) -> FullCycleResult:
     """
     Full smart-memory cycle:
@@ -491,7 +492,7 @@ async def query_memory(
     return result
 
 
-@router.post("/memory/rebuild", response_model=RebuildResult)
+@router.post("/memory/rebuild", dependencies=_admin_only, response_model=RebuildResult)
 async def rebuild(body: RebuildRequest, request: Request) -> RebuildResult:
     db_path: str = get_db_url(request)
     output_path = Path(body.output_path)

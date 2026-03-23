@@ -23,8 +23,10 @@ from engine.chunker import chunk_text
 from engine.scorer import score_chunks
 from api.push_client import push_snapshot
 from api.db_helper import get_conn, get_db_url
+from api.auth import require_role
 
-router = APIRouter(tags=["ingest"], dependencies=[Depends(verify_token)])
+# All ingest routes require at minimum admin role
+router = APIRouter(tags=["ingest"], dependencies=[Depends(verify_token), Depends(require_role("admin"))])
 
 
 class IngestRequest(BaseModel):

@@ -24,7 +24,7 @@ from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Query, Request, WebSocket, WebSocketDisconnect
-from api.auth import verify_token, decode_token, get_current_user_email, AUTH0_DOMAIN
+from api.auth import verify_token, decode_token, get_current_user_email, AUTH0_DOMAIN, require_role
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -769,7 +769,7 @@ SQS_QUEUE_URL = os.environ.get(
 AWS_REGION = os.environ.get("AWS_REGION", "us-west-2")
 
 
-@router.post("/token-data/distill", status_code=202)
+@router.post("/token-data/distill", status_code=202, dependencies=[Depends(require_role("admin"))])
 async def trigger_distill(request: Request, token_payload: Optional[dict] = Depends(verify_token)) -> dict:
     """
     Publish a distill_and_clear message to the SQS queue.
@@ -823,7 +823,7 @@ async def trigger_distill(request: Request, token_payload: Optional[dict] = Depe
         raise HTTPException(status_code=502, detail=f"SQS error: {exc}")
 
 
-@router.delete("/token-data/clear", status_code=200)
+@router.delete("/token-data/clear", status_code=200, dependencies=[Depends(require_role("admin"))])
 async def clear_token_usage(request: Request, token_payload: Optional[dict] = Depends(verify_token)) -> dict:
     """
     Delete token_usage rows for the requesting user only.
