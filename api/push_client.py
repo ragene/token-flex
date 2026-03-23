@@ -130,26 +130,35 @@ def _build_token_data() -> dict:
             return 0
 
     session_files = list(sessions_dir.glob("*.jsonl")) if sessions_dir.exists() else []
-    # Identify the active session ID from sessions.json so we can track it separately
-    _active_sid = None
+
+    # Use totalTokens from sessions.json metadata — accurate count tracked by OpenClaw.
+    # Fall back to chars//4 heuristic only when metadata is absent.
+    _active_sid    = None
+    _active_tokens = 0
+    _idle_tokens   = 0
     try:
         import json as _j
         _sj = sessions_dir / "sessions.json"
         if _sj.exists():
             _meta = _j.loads(_sj.read_text(errors="ignore"))
-            _sm = _meta.get("agent:main:main") or next(iter(_meta.values()), {})
-            _active_sid = _sm.get("sessionId")
+            for _key, _sm in _meta.items():
+                _sid = _sm.get("sessionId")
+                _tok = _sm.get("totalTokens") or 0
+                if not _tok:
+                    # fallback: estimate from file size
+                    _sf = sessions_dir / f"{_sid}.jsonl" if _sid else None
+                    _tok = _approx(_sf) if _sf else 0
+                # Active session = the main agent session
+                if _key == "agent:main:main":
+                    _active_sid    = _sid
+                    _active_tokens = _tok
+                else:
+                    _idle_tokens += _tok
     except Exception:
-        pass
+        # Full fallback — sum all session files by chars//4
+        for f in session_files:
+            _idle_tokens += _approx(f)
 
-    _active_tokens = 0
-    _idle_tokens = 0
-    for f in session_files:
-        t = _approx(f)
-        if _active_sid and f.stem == _active_sid:
-            _active_tokens = t
-        else:
-            _idle_tokens += t
     session_tokens = _active_tokens + _idle_tokens
 
     today = datetime.utcnow().date().isoformat()

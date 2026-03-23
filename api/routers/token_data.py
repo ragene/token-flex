@@ -97,24 +97,48 @@ def _build_tokens_and_session(database_url: str, user_email: Optional[str] = Non
             return 0
 
     # ── tokens ───────────────────────────────────────────────────────────────
-    session_files  = list(SESSIONS_DIR.glob("*.jsonl")) if SESSIONS_DIR.exists() else []
-    session_tokens = sum(_approx(f) for f in session_files)
+    session_files = list(SESSIONS_DIR.glob("*.jsonl")) if SESSIONS_DIR.exists() else []
+
+    # Use totalTokens from sessions.json — accurate count tracked by OpenClaw.
+    # Fall back to chars//4 only when metadata is absent.
+    _active_tokens = 0
+    _idle_tokens   = 0
+    try:
+        import json as _jj
+        _sj = SESSIONS_DIR / "sessions.json"
+        if _sj.exists():
+            _meta = _jj.loads(_sj.read_text(errors="ignore"))
+            for _key, _sm in _meta.items():
+                _sid = _sm.get("sessionId")
+                _tok = _sm.get("totalTokens") or 0
+                if not _tok:
+                    _sf = SESSIONS_DIR / f"{_sid}.jsonl" if _sid else None
+                    _tok = _approx(_sf) if _sf else 0
+                if _key == "agent:main:main":
+                    _active_tokens = _tok
+                else:
+                    _idle_tokens += _tok
+    except Exception:
+        for f in session_files:
+            _idle_tokens += _approx(f)
+    session_tokens = _active_tokens + _idle_tokens
 
     from datetime import date as _date
     today = _date.today().isoformat()
     mem_file = MEMORY_DIR / f"{today}.md"
     memory_tokens = _approx(mem_file) if mem_file.exists() else 0
     total = session_tokens + memory_tokens
+    clearable = _idle_tokens + memory_tokens
 
-    if total >= DISTILL_THRESHOLD:
+    if clearable >= DISTILL_THRESHOLD:
         status = "critical"
-        msg = f"⚠️ Context is very large (~{total:,} tokens). Distill NOW."
-    elif total >= WARN_THRESHOLD:
+        msg = f"⚠️ Clearable context large (~{clearable:,} tokens). Distill NOW."
+    elif clearable >= WARN_THRESHOLD:
         status = "warning"
-        msg = f"🟡 Context growing (~{total:,} tokens). Consider distilling soon."
+        msg = f"🟡 Clearable context growing (~{clearable:,} tokens). Consider distilling."
     else:
         status = "ok"
-        msg = f"✅ Context healthy (~{total:,} tokens)."
+        msg = f"✅ Context healthy (~{clearable:,} clearable tokens). Active: ~{_active_tokens:,} tokens."
 
     # Chunk cache counts (not filtered by user — chunk_cache has no user_email column)
     cached_chunks = 0
