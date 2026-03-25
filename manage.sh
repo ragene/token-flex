@@ -4,14 +4,33 @@
 # Supports: Linux (systemd user service), macOS (nohup fallback)
 set -euo pipefail
 
-# ── Systemd delegation (Linux only) ──────────────────────────────────────────
-# On Linux, delegate start/stop/restart/status to the systemd user service so
-# the process is fully detached from any terminal/TUI session and auto-restarts
-# on failure.  Falls through to the legacy nohup path on macOS or if systemd
-# is unavailable.
+# ── OS detection (early — needed by delegation block below) ──────────────────
+OS="$(uname -s)"
+case "$OS" in
+  Linux*)  PLATFORM="linux" ;;
+  Darwin*) PLATFORM="mac"   ;;
+  *)       PLATFORM="unknown" ;;
+esac
+
+PORT="${TOKEN_FLOW_PORT:-8001}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SERVER_SCRIPT="${SCRIPT_DIR}/main.py"
+
+# ── Service-manager delegation ────────────────────────────────────────────────
+# On Linux  → systemd user service (token-flow.service)
+# On macOS  → launchd user agent  (com.freightdawg.token-flow)
+# Falls through to legacy nohup path if neither is available / installed.
+
+LAUNCHD_LABEL="com.freightdawg.token-flow"
+LAUNCHD_PLIST="${HOME}/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
+
 _systemd_available() {
-  [[ "$(uname -s)" == "Linux" ]] && command -v systemctl &>/dev/null && \
+  [[ "$PLATFORM" == "linux" ]] && command -v systemctl &>/dev/null && \
     systemctl --user list-units &>/dev/null 2>&1
+}
+
+_launchd_installed() {
+  [[ "$PLATFORM" == "mac" ]] && [[ -f "$LAUNCHD_PLIST" ]]
 }
 
 _systemd_delegate() {
@@ -37,24 +56,52 @@ _systemd_delegate() {
   esac
 }
 
+_launchd_delegate() {
+  local subcmd="$1"
+  case "$subcmd" in
+    start)
+      launchctl load -w "$LAUNCHD_PLIST" 2>/dev/null || launchctl start "$LAUNCHD_LABEL" 2>/dev/null || true
+      sleep 2
+      launchctl list | grep "$LAUNCHD_LABEL" || echo "  (service not listed — may have failed to start)"
+      curl -sf "http://localhost:${PORT}/health" && echo "✅ token-flow running on http://localhost:${PORT}" || echo "⚠️  /health not responding yet"
+      ;;
+    stop)
+      launchctl stop "$LAUNCHD_LABEL" 2>/dev/null || true
+      echo "✅ token-flow stopped."
+      ;;
+    restart)
+      launchctl stop "$LAUNCHD_LABEL" 2>/dev/null || true
+      sleep 2
+      launchctl start "$LAUNCHD_LABEL" 2>/dev/null || true
+      sleep 2
+      curl -sf "http://localhost:${PORT}/health" && echo "✅ token-flow running on http://localhost:${PORT}" || echo "⚠️  /health not responding yet"
+      ;;
+    status)
+      local entry
+      entry=$(launchctl list | grep "$LAUNCHD_LABEL" || true)
+      if [[ -n "$entry" ]]; then
+        echo "✅ token-flow running ($LAUNCHD_LABEL)"
+        echo "   $entry"
+        curl -sf "http://localhost:${PORT}/health" | python3 -m json.tool 2>/dev/null || true
+      else
+        echo "❌ token-flow not running."
+      fi
+      ;;
+  esac
+}
+
 _early_cmd="${1:-status}"
+
 if _systemd_available && [[ "$_early_cmd" =~ ^(start|stop|restart|status)$ ]]; then
   _systemd_delegate "$_early_cmd"
   exit $?
 fi
+
+if _launchd_installed && [[ "$_early_cmd" =~ ^(start|stop|restart|status)$ ]]; then
+  _launchd_delegate "$_early_cmd"
+  exit $?
+fi
 # ─────────────────────────────────────────────────────────────────────────────
-
-PORT="${TOKEN_FLOW_PORT:-8001}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SERVER_SCRIPT="${SCRIPT_DIR}/main.py"
-
-# ── OS detection ─────────────────────────────────────────────────────────────
-OS="$(uname -s)"
-case "$OS" in
-  Linux*)  PLATFORM="linux" ;;
-  Darwin*) PLATFORM="mac"   ;;
-  *)       PLATFORM="unknown" ;;
-esac
 
 # ── Platform-specific paths ───────────────────────────────────────────────────
 if [[ "$PLATFORM" == "mac" ]]; then
@@ -360,8 +407,148 @@ except Exception:
     fi
     ;;
 
+  install-service)
+    if [[ "$PLATFORM" == "linux" ]]; then
+      # ── Linux: systemd user service ──────────────────────────────────────
+      UNIT_DIR="${HOME}/.config/systemd/user"
+      UNIT_FILE="${UNIT_DIR}/token-flow.service"
+      mkdir -p "$UNIT_DIR"
+
+      # Load .env to embed values into the unit file
+      if [[ -f "${SCRIPT_DIR}/.env" ]]; then
+        set -o allexport; source "${SCRIPT_DIR}/.env"; set +o allexport
+      fi
+
+      _resolve_api_key
+
+      cat > "$UNIT_FILE" <<UNIT
+[Unit]
+Description=Token Flow API
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=${SCRIPT_DIR}
+EnvironmentFile=${SCRIPT_DIR}/.env
+Environment=TOKEN_FLOW_PORT=${PORT}
+Environment=TOKEN_FLOW_DB=${TOKEN_FLOW_DB:-${DEFAULT_DB}}
+Environment=WORKSPACE=${WORKSPACE:-${DEFAULT_WORKSPACE}}
+Environment=MEMORY_DIR=${MEMORY_DIR:-${DEFAULT_MEMORY_DIR}}
+Environment=SESSIONS_DIR=${SESSIONS_DIR:-${DEFAULT_SESSIONS_DIR}}
+Environment=S3_BUCKET=${S3_BUCKET:-smart-memory}
+Environment=OWNER_EMAIL=${OWNER_EMAIL:-admin@thefreightdawg.com}
+Environment=SKIP_STARTUP_AUTH=false
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -u ${SERVER_SCRIPT}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+UNIT
+
+      systemctl --user daemon-reload
+      systemctl --user enable token-flow
+      echo "✅ systemd user service installed and enabled."
+      echo "   Unit : $UNIT_FILE"
+      echo "   Start: manage.sh start"
+
+    elif [[ "$PLATFORM" == "mac" ]]; then
+      # ── macOS: launchd user agent ────────────────────────────────────────
+      mkdir -p "${HOME}/Library/LaunchAgents"
+      mkdir -p "${TMP_DIR}"
+
+      # Load .env
+      if [[ -f "${SCRIPT_DIR}/.env" ]]; then
+        set -o allexport; source "${SCRIPT_DIR}/.env"; set +o allexport
+      fi
+      _resolve_api_key
+
+      PYTHON_BIN="$(command -v python3)"
+      LOG_OUT="${TMP_DIR}/token-flow.log"
+      LOG_ERR="${TMP_DIR}/token-flow-err.log"
+
+      cat > "$LAUNCHD_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${LAUNCHD_LABEL}</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>${PYTHON_BIN}</string>
+    <string>-u</string>
+    <string>${SERVER_SCRIPT}</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>${SCRIPT_DIR}</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>TOKEN_FLOW_PORT</key>       <string>${PORT}</string>
+    <key>TOKEN_FLOW_DB</key>         <string>${TOKEN_FLOW_DB:-${DEFAULT_DB}}</string>
+    <key>WORKSPACE</key>             <string>${WORKSPACE:-${DEFAULT_WORKSPACE}}</string>
+    <key>MEMORY_DIR</key>            <string>${MEMORY_DIR:-${DEFAULT_MEMORY_DIR}}</string>
+    <key>SESSIONS_DIR</key>          <string>${SESSIONS_DIR:-${DEFAULT_SESSIONS_DIR}}</string>
+    <key>S3_BUCKET</key>             <string>${S3_BUCKET:-smart-memory}</string>
+    <key>AUTH0_DOMAIN</key>          <string>${AUTH0_DOMAIN:-}</string>
+    <key>AUTH0_CLIENT_ID</key>       <string>${AUTH0_CLIENT_ID:-}</string>
+    <key>SECRET_KEY</key>            <string>${SECRET_KEY:-}</string>
+    <key>TOKEN_FLOW_UI_URL</key>     <string>${TOKEN_FLOW_UI_URL:-}</string>
+    <key>ANTHROPIC_API_KEY</key>     <string>${ANTHROPIC_API_KEY:-}</string>
+    <key>OWNER_EMAIL</key>           <string>${OWNER_EMAIL:-}</string>
+    <key>SKIP_STARTUP_AUTH</key>     <string>false</string>
+    <key>PYTHONUNBUFFERED</key>      <string>1</string>
+  </dict>
+
+  <key>RunAtLoad</key>        <true/>
+  <key>KeepAlive</key>        <true/>
+  <key>ThrottleInterval</key> <integer>5</integer>
+
+  <key>StandardOutPath</key>  <string>${LOG_OUT}</string>
+  <key>StandardErrorPath</key><string>${LOG_ERR}</string>
+</dict>
+</plist>
+PLIST
+
+      launchctl load -w "$LAUNCHD_PLIST"
+      echo "✅ launchd agent installed and loaded."
+      echo "   Plist: $LAUNCHD_PLIST"
+      echo "   Logs : $LOG_OUT / $LOG_ERR"
+      echo "   Start: manage.sh start"
+
+    else
+      echo "❌ install-service is not supported on platform: $PLATFORM"
+      exit 1
+    fi
+    ;;
+
+  uninstall-service)
+    if [[ "$PLATFORM" == "linux" ]]; then
+      systemctl --user stop token-flow 2>/dev/null || true
+      systemctl --user disable token-flow 2>/dev/null || true
+      UNIT_FILE="${HOME}/.config/systemd/user/token-flow.service"
+      rm -f "$UNIT_FILE"
+      systemctl --user daemon-reload
+      echo "✅ systemd user service removed."
+
+    elif [[ "$PLATFORM" == "mac" ]]; then
+      launchctl unload -w "$LAUNCHD_PLIST" 2>/dev/null || true
+      rm -f "$LAUNCHD_PLIST"
+      echo "✅ launchd agent removed."
+
+    else
+      echo "❌ uninstall-service is not supported on platform: $PLATFORM"
+      exit 1
+    fi
+    ;;
+
   *)
-    echo "Usage: $0 [start|stop|restart|status|install-deps|start-poller|stop-poller|status-poller]"
+    echo "Usage: $0 [start|stop|restart|status|install-deps|install-service|uninstall-service|start-poller|stop-poller|status-poller]"
     exit 1
     ;;
 esac
