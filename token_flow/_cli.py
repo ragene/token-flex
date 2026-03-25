@@ -5,12 +5,14 @@ Commands
 --------
   tf-server start            Start the token-flow API service (default)
   tf-server start --port N   Override port (default: 8001)
-  tf-server start --no-auth  Skip Auth0 device flow on startup
   tf-server stop             Stop a running service (by PID file)
   tf-server restart          stop + start
   tf-server status           Print running status + health check
   tf-server distill          Run one full ingest→distill→clear→rebuild cycle and exit
   tf-server poller           Start the SQS memory-distill poller (background worker)
+
+Auth0 device flow runs on every start/restart. A cached token is used if
+still valid; otherwise a fresh device flow is initiated.
 
 Environment variables honoured
 -------------------------------
@@ -22,7 +24,7 @@ Environment variables honoured
   SESSIONS_DIR         OpenClaw sessions directory
   S3_BUCKET            S3 bucket for summary export
   TOKEN_FLOW_UI_URL    Remote UI URL — enables the 30-second push loop
-  TOKEN_FLOW_JWT       Pre-minted JWT to cache on startup (used with --no-auth)
+  TOKEN_FLOW_JWT       Pre-minted JWT to seed the auth cache (ECS/headless deployments)
   TOKEN_FLOW_REPO      Path to the token-flow repo (for .env discovery)
   TOKEN_FLOW_ENV_FILE  Explicit path to a .env file to load
   AUTH0_DOMAIN         Auth0 domain (default tokenflow.us.auth0.com)
@@ -92,7 +94,7 @@ def _resolve_paths():
 
 # ── SSO helpers (mirrors main.py logic) ──────────────────────────────────────
 
-def _run_sso(port: int, skip: bool) -> tuple[list, list]:
+def _run_sso(port: int) -> tuple[list, list]:
     """
     Phase 1 SSO: device flow (pre-server).
     Returns (auth0_token_holder, sso_user_holder) — mutable 1-element lists
@@ -100,18 +102,6 @@ def _run_sso(port: int, skip: bool) -> tuple[list, list]:
     """
     auth0_token: list = [""]
     sso_user:    list = [{}]
-
-    if skip:
-        print("🔐 SSO: skipping startup auth (--no-auth)")
-        preset_jwt = os.environ.get("TOKEN_FLOW_JWT", "").strip()
-        if preset_jwt:
-            try:
-                from api.device_auth import _save_cache
-                _save_cache(preset_jwt, expires_in=365 * 24 * 3600)
-                print("🔐 SSO: TOKEN_FLOW_JWT cached from env")
-            except Exception as e:
-                print(f"⚠️  Could not cache TOKEN_FLOW_JWT: {e}")
-        return auth0_token, sso_user
 
     try:
         from api.device_auth import _load_cache, get_cached_user, _device_flow
@@ -232,7 +222,6 @@ def cmd_start(args: argparse.Namespace) -> int:
     port     = int(os.environ.get("TOKEN_FLOW_PORT", args.port))
     db_url   = _resolve_db_url()
     workspace, memory_dir = _resolve_paths()
-    skip_auth = getattr(args, "no_auth", False)
 
     print(f"🔧 token-flow service starting on http://localhost:{port}")
     print(f"   Workspace : {workspace}")
@@ -240,7 +229,7 @@ def cmd_start(args: argparse.Namespace) -> int:
     print(f"   DB        : {'SQLite (local)' if db_url.startswith('sqlite') else 'PostgreSQL'}")
 
     # Phase 1: SSO (blocking, before server starts)
-    auth0_token, sso_user = _run_sso(port, skip=skip_auth)
+    auth0_token, sso_user = _run_sso(port)
 
     # Init DB schema
     from db.schema import init_db
@@ -415,15 +404,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     # start
     s = sub.add_parser("start", help="Start the token-flow service")
-    s.add_argument("--no-auth", action="store_true",
-                   help="Skip Auth0 device flow on startup")
     s.add_argument("--port", type=int, default=8001, metavar="PORT")
 
     # stop / restart / status
     sub.add_parser("stop", help="Stop the running service")
     re = sub.add_parser("restart", help="Restart the service")
-    re.add_argument("--no-auth", action="store_true",
-                    help="Skip Auth0 device flow on restart")
     re.add_argument("--port", type=int, default=8001, metavar="PORT")
     r = sub.add_parser("status", help="Print running status and health")
     r.add_argument("--port", type=int, default=8001, metavar="PORT")
@@ -466,8 +451,6 @@ def main() -> None:
 
     if args.cmd is None:
         args.cmd = "start"
-        if not hasattr(args, "no_auth"):
-            args.no_auth = False
 
     dispatch = {
         "start":   cmd_start,
