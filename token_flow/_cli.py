@@ -272,6 +272,18 @@ def cmd_start(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_install_service(_args: argparse.Namespace) -> int:
+    from token_flow._service import install_service
+    install_service()
+    return 0
+
+
+def cmd_uninstall_service(_args: argparse.Namespace) -> int:
+    from token_flow._service import uninstall_service
+    uninstall_service()
+    return 0
+
+
 def cmd_stop(_args: argparse.Namespace) -> int:
     if not _is_running():
         print("ℹ️  token-flow not running.")
@@ -439,6 +451,10 @@ def build_parser() -> argparse.ArgumentParser:
     po = sub.add_parser("poller", help="Run the SQS memory-distill poller")
     po.add_argument("--hint", default="", metavar="TEXT")
 
+    # service management
+    sub.add_parser("install-service",   help="Install and start the OS service (systemd/launchd/Task Scheduler)")
+    sub.add_parser("uninstall-service", help="Stop and remove the OS service")
+
     return p
 
 
@@ -466,12 +482,14 @@ def main() -> None:
         args.cmd = "start"
 
     dispatch = {
-        "start":   cmd_start,
-        "stop":    cmd_stop,
-        "restart": cmd_restart,
-        "status":  cmd_status,
-        "distill": cmd_distill,
-        "poller":  cmd_poller,
+        "start":             cmd_start,
+        "stop":              cmd_stop,
+        "restart":           cmd_restart,
+        "status":            cmd_status,
+        "distill":           cmd_distill,
+        "poller":            cmd_poller,
+        "install-service":   cmd_install_service,
+        "uninstall-service": cmd_uninstall_service,
     }
     handler = dispatch.get(args.cmd)
     if not handler:

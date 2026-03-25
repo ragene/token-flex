@@ -28,6 +28,10 @@ dev = ["pytest", "httpx"]
 [project.scripts]
 tf-server  = "token_flow._cli:main"
 
+[tool.token-flow]
+# Post-install auto-service setup is handled by setup.py cmdclass hooks.
+# Supported commands: tf-server install-service | uninstall-service
+
 [tool.setuptools.packages.find]
 # All importable packages live at the repo root (no src/ layout).
 # We include the four source trees and exclude build/deploy noise.

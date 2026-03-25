@@ -6,11 +6,50 @@ Canonical config lives in pyproject.toml; this file exists so that
 `tf-server` CLI entry point explicitly.
 
 CLI commands registered:
-  tf-server          → token_flow._cli:main  (start/stop/restart/status/distill/poller)
+  tf-server          → token_flow._cli:main  (start/stop/restart/status/distill/poller/install-service/uninstall-service)
+
+Post-install:
+  Automatically installs and starts the appropriate OS service:
+    Linux   → systemd user service
+    macOS   → launchd user agent
+    Windows → Windows Task Scheduler task
 """
+import subprocess
+import sys
 from setuptools import setup, find_packages
+from setuptools.command.install import install
+from setuptools.command.develop import develop
+
+
+def _run_install_service():
+    """Invoke tf-server install-service after the package is installed."""
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "token_flow._cli_runner", "install-service"],
+            check=False,
+        )
+    except Exception as e:
+        print(f"⚠️  Post-install service setup failed (non-fatal): {e}", file=sys.stderr)
+        print("    Run manually: tf-server install-service", file=sys.stderr)
+
+
+class PostInstall(install):
+    def run(self):
+        super().run()
+        _run_install_service()
+
+
+class PostDevelop(develop):
+    def run(self):
+        super().run()
+        _run_install_service()
+
 
 setup(
+    cmdclass={
+        "install": PostInstall,
+        "develop": PostDevelop,
+    },
     name="token-flow-service",
     version="0.1.0",
     description="token-flow — local memory distillation and token tracking service for OpenClaw.",
