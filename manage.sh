@@ -175,6 +175,7 @@ case "$cmd" in
       "TOKEN_FLOW_UI_URL=${TOKEN_FLOW_UI_URL:-}"
       "TOKEN_FLOW_JWT=$(_load_tf_jwt)"
       "OWNER_EMAIL=${_OWNER_EMAIL}"
+      "SKIP_STARTUP_AUTH=false"
     )
 
     nohup env "${_env[@]}" PYTHONUNBUFFERED=1 python3 -u "$SERVER_SCRIPT" >> "$LOG_FILE" 2>&1 &
