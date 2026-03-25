@@ -4,7 +4,7 @@ import TokenMeter from '../components/TokenMeter.jsx'
 import { postDistillAndClear, getCurrentUser } from '../api.js'
 
 const BASE_URL = import.meta.env.VITE_API_URL || ''
-const STREAM_INTERVAL = 10 // seconds between server pushes
+const STREAM_INTERVAL = 30 // seconds between client-initiated pings for fresh data
 const _WS_BASE = BASE_URL
   ? BASE_URL.replace(/^http/, 'ws') + '/token-data/ws'
   : (window.location.protocol === 'https:' ? 'wss' : 'ws') + '://' + window.location.host + '/token-data/ws'
@@ -71,6 +71,22 @@ export default function Dashboard() {
       if (wsRef.current) { wsRef.current.onclose = null; wsRef.current.close() }
     }
   }, [connect])
+
+  // Periodic ping — send a refresh request every STREAM_INTERVAL seconds
+  // so the dashboard updates even when the local push loop isn't running.
+  const pingRef = useRef(null)
+  useEffect(() => {
+    const startPing = () => {
+      if (pingRef.current) clearInterval(pingRef.current)
+      pingRef.current = setInterval(() => {
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send('ping')
+        }
+      }, STREAM_INTERVAL * 1000)
+    }
+    startPing()
+    return () => { if (pingRef.current) clearInterval(pingRef.current) }
+  }, [])
 
   const [distilling, setDistilling] = useState(false)
   const [distillResult, setDistillResult] = useState(null)

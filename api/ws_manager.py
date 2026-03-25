@@ -76,10 +76,18 @@ class WSManager:
                 # Skip unauthenticated sockets when scoped data is being pushed.
                 # Their next manual ping will request a fresh snapshot via the WS loop.
                 continue
+            # Build snapshot separately from the send — a snapshot error should NOT
+            # kill the WS connection (it might be a transient DB blip).
+            # Only a send failure (broken pipe, client gone) warrants pruning.
             try:
                 data = snapshot_fn(email)
+            except Exception as exc:
+                log.warning("WSManager.notify: snapshot_fn(%s) raised (skipping this push): %s", email, exc, exc_info=True)
+                continue  # skip this push cycle; connection stays alive
+            try:
                 await ws.send_text(json.dumps(data, default=_default))
-            except Exception:
+            except Exception as exc:
+                log.debug("WSManager.notify: send to %s failed (pruning): %s", email, exc)
                 dead.append(ws)
         for ws in dead:
             self._clients.pop(ws, None)

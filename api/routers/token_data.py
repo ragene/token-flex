@@ -365,19 +365,16 @@ def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict
     if pushed:
         # Determine if the requesting user is the machine owner.
         _owner_email = (pushed.get("owner_email") or "").strip()
-        _is_owner = (not user_email) or (bool(_owner_email) and user_email == _owner_email)
+        # If owner_email is not set in push_cache (local service didn't resolve it),
+        # treat any authenticated user as the owner — single-user assumption.
+        # This prevents the dashboard going blank when owner_email isn't configured.
+        _is_owner = (not user_email) or (not _owner_email) or (user_email == _owner_email)
 
         # tokens/session = local machine data — show to owner only.
         # Remote viewers get None so the UI hides the section.
         tokens  = (pushed.get("tokens")  or {}) if _is_owner else None
         session = (pushed.get("session") or {"session_id": None, "token_count_approx": 0, "message_count": 0}) if _is_owner \
                   else {"session_id": None, "token_count_approx": 0, "message_count": 0}
-        # token_usage lives in local SQLite (not Postgres), so the DB queries above
-        # return empty rows.  When the DB has no data, pull summary/events from the
-        # push_cache snapshot sent by the local service — but only when no user filter
-        # is active (i.e. admin/unauthenticated view).  For authenticated users we
-        # never fall back to the unscoped push_cache summary/events because that would
-        # leak other users' data into a user-scoped session.
         # token_usage lives in local SQLite (not Postgres), so DB queries above
         # return empty when using a remote Postgres deployment.  Fall back to
         # push_cache data, but filter it to the requesting user when user_email
@@ -385,21 +382,25 @@ def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict
         if not events and pushed.get("events"):
             cached_events = pushed["events"]
             if user_email:
-                # Only include rows explicitly tagged to this user.
-                # Rows with a blank/null user_email are genuinely unattributed
-                # (old records before user tracking was added) — include them
-                # only if they are the ONLY user connected, i.e. single-user mode.
-                # In multi-user deployments, unattributed rows are ambiguous and
-                # must not be assigned to a random authenticated user.
-                events = [
-                    e for e in cached_events
-                    if e.get("user_email") == user_email
-                ]
+                if _is_owner:
+                    # Owner sees all events including unattributed ones (empty user_email).
+                    # These occur when the local service couldn't resolve owner_email at
+                    # push time — they belong to the owner, not an unknown third party.
+                    events = [
+                        e for e in cached_events
+                        if not e.get("user_email") or e.get("user_email") == user_email
+                    ]
+                else:
+                    # Non-owner: only show events explicitly tagged to this user.
+                    events = [
+                        e for e in cached_events
+                        if e.get("user_email") == user_email
+                    ]
             else:
                 events = cached_events
 
         if not summary_rows and pushed.get("summary"):
-            if user_email:
+            if user_email and events:
                 # Recompute summary totals from the already-filtered events list
                 # so the summary card reflects only this user's usage.
                 from collections import defaultdict
@@ -420,7 +421,8 @@ def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict
                 grand_calls  = sum(r["total_calls"]  for r in summary_rows)
                 grand_cost   = round(sum(r["cost_usd"] for r in summary_rows), 6)
             else:
-                # No user filter — serve the full unscoped push_cache summary (admin view)
+                # No user filter (or owner with events already covered) — serve full
+                # unscoped push_cache summary (admin / single-user view).
                 pushed_summary = pushed["summary"]
                 summary_rows   = pushed_summary.get("rows", summary_rows)
                 grand_tokens   = pushed_summary.get("grand_total_tokens", grand_tokens)
@@ -582,8 +584,17 @@ async def token_data_ws(websocket: WebSocket, token: Optional[str] = None) -> No
             try:
                 msg = await asyncio.wait_for(websocket.receive_text(), timeout=60)
                 # Client sent a ping — reply with a fresh snapshot
-                snapshot = _build_snapshot(database_url, user_email=user_email)
-                await websocket.send_text(_json.dumps(snapshot, default=_json_default))
+                try:
+                    snapshot = _build_snapshot(database_url, user_email=user_email)
+                    await websocket.send_text(_json.dumps(snapshot, default=_json_default))
+                except Exception as snap_err:
+                    log.warning("token_data_ws: snapshot build failed on ping (keeping connection): %s", snap_err)
+                    # Send a lightweight error message so the UI knows something went wrong
+                    # but keep the WS alive — it may succeed on the next push/ping.
+                    try:
+                        await websocket.send_text(_json.dumps({"ts": datetime.utcnow().isoformat() + "Z", "error": "Snapshot build failed — retrying shortly."}))
+                    except Exception:
+                        break
             except asyncio.TimeoutError:
                 # Send a keepalive ping to prevent proxy/LB idle timeout
                 try:
