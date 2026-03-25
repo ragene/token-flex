@@ -31,6 +31,10 @@ log = logging.getLogger(__name__)
 
 _DEFAULT_UI_URL = "https://token-flow.thefreightdawg.com"
 
+# Suppress repeated "no auth token" warnings — warn once, stay quiet until a
+# token is resolved or the push succeeds.
+_warned_no_token: bool = False
+
 
 def _normalize_db_url(db_path: str) -> str:
     """Ensure db_path is a proper URL for pg_compat.connect().
@@ -529,15 +533,24 @@ def push_snapshot(
     base = (ui_url or os.environ.get("TOKEN_FLOW_UI_URL", _DEFAULT_UI_URL)).rstrip("/")
     endpoint = f"{base}/token-data/push"
 
+    global _warned_no_token
     try:
         data = payload if payload is not None else _build_snapshot(db_path)
         body = json.dumps(data).encode()
         headers = {"Content-Type": "application/json"}
         token = _get_push_token()
         if token:
+            if _warned_no_token:
+                log.info("push_snapshot: auth token now available — push resuming")
+                _warned_no_token = False
             headers["Authorization"] = f"Bearer {token}"
         else:
-            log.warning("push_snapshot: no auth token available — push may be rejected (401)")
+            if not _warned_no_token:
+                log.warning("push_snapshot: no auth token available — push will be retried silently until one is found")
+                _warned_no_token = True
+            # Skip the push entirely rather than sending an unauthenticated request
+            # that will 401 and waste bandwidth every 30s.
+            return
         req = urllib.request.Request(
             endpoint,
             data=body,
