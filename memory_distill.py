@@ -12,6 +12,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+# Auto-load .env from the script's directory
+_env_file = Path(__file__).parent / ".env"
+if _env_file.exists():
+    for _line in _env_file.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _, _v = _line.partition("=")
+            os.environ.setdefault(_k.strip(), _v.strip())
+
 DB_PATH = Path(os.environ.get("MEMORY_DB", "/home/ec2-user/.openclaw/workspace/memory/context.db"))
 MEMORY_DIR = Path(os.environ.get("MEMORY_DIR", "/home/ec2-user/.openclaw/workspace/memory"))
 WORKSPACE = Path(os.environ.get("WORKSPACE", "/home/ec2-user/.openclaw/workspace"))
