@@ -22,8 +22,9 @@ Environment variables honoured
   SESSIONS_DIR         OpenClaw sessions directory
   S3_BUCKET            S3 bucket for summary export
   TOKEN_FLOW_UI_URL    Remote UI URL — enables the 30-second push loop
-  SKIP_STARTUP_AUTH    Set to "true" to skip Auth0 device flow (not recommended)
-  TOKEN_FLOW_JWT       Pre-minted JWT to use when SKIP_STARTUP_AUTH=true
+  TOKEN_FLOW_JWT       Pre-minted JWT to cache on startup (used with --no-auth)
+  TOKEN_FLOW_REPO      Path to the token-flow repo (for .env discovery)
+  TOKEN_FLOW_ENV_FILE  Explicit path to a .env file to load
   AUTH0_DOMAIN         Auth0 domain (default tokenflow.us.auth0.com)
   AUTH0_CLIENT_ID      Auth0 client ID
   SECRET_KEY           JWT signing secret
@@ -101,7 +102,7 @@ def _run_sso(port: int, skip: bool) -> tuple[list, list]:
     sso_user:    list = [{}]
 
     if skip:
-        print("🔐 SSO: skipping startup auth (SKIP_STARTUP_AUTH=true)")
+        print("🔐 SSO: skipping startup auth (--no-auth)")
         preset_jwt = os.environ.get("TOKEN_FLOW_JWT", "").strip()
         if preset_jwt:
             try:
@@ -231,7 +232,7 @@ def cmd_start(args: argparse.Namespace) -> int:
     port     = int(os.environ.get("TOKEN_FLOW_PORT", args.port))
     db_url   = _resolve_db_url()
     workspace, memory_dir = _resolve_paths()
-    skip_auth = args.no_auth or os.environ.get("SKIP_STARTUP_AUTH", "").lower() in ("1", "true", "yes")
+    skip_auth = getattr(args, "no_auth", False)
 
     print(f"🔧 token-flow service starting on http://localhost:{port}")
     print(f"   Workspace : {workspace}")
@@ -415,13 +416,16 @@ def build_parser() -> argparse.ArgumentParser:
     # start
     s = sub.add_parser("start", help="Start the token-flow service")
     s.add_argument("--no-auth", action="store_true",
-                   help="Skip Auth0 device flow (SKIP_STARTUP_AUTH=true)")
+                   help="Skip Auth0 device flow on startup")
     s.add_argument("--port", type=int, default=8001, metavar="PORT")
 
     # stop / restart / status
-    sub.add_parser("stop",    help="Stop the running service")
-    sub.add_parser("restart", help="Restart the service")
-    r = sub.add_parser("status",  help="Print running status and health")
+    sub.add_parser("stop", help="Stop the running service")
+    re = sub.add_parser("restart", help="Restart the service")
+    re.add_argument("--no-auth", action="store_true",
+                    help="Skip Auth0 device flow on restart")
+    re.add_argument("--port", type=int, default=8001, metavar="PORT")
+    r = sub.add_parser("status", help="Print running status and health")
     r.add_argument("--port", type=int, default=8001, metavar="PORT")
 
     # distill
@@ -443,13 +447,17 @@ def build_parser() -> argparse.ArgumentParser:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
-    # Load .env from current dir or token-flow repo root before parsing args
+    # Load .env — check explicit override, then cwd, then repo root, then package parent
     from dotenv import load_dotenv
+    _explicit = os.environ.get("TOKEN_FLOW_ENV_FILE")
     for candidate in [
+        Path(_explicit) if _explicit else None,
         Path.cwd() / ".env",
         Path(__file__).parent.parent / ".env",
+        # Repo .env: resolved via TOKEN_FLOW_REPO or a well-known default
+        Path(os.environ.get("TOKEN_FLOW_REPO", "/home/ec2-user/.openclaw/workspace/token-flow")) / ".env",
     ]:
-        if candidate.exists():
+        if candidate and candidate.exists():
             load_dotenv(candidate)
             break
 
@@ -458,7 +466,6 @@ def main() -> None:
 
     if args.cmd is None:
         args.cmd = "start"
-        # inject defaults that start requires
         if not hasattr(args, "no_auth"):
             args.no_auth = False
 
