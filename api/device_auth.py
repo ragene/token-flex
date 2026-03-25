@@ -71,6 +71,61 @@ def _post_json(url: str, data: dict, headers: Optional[dict] = None, timeout: in
         return json.loads(r.read().decode())
 
 
+def _try_open_browser(url: str) -> bool:
+    """
+    Attempt to open *url* in a GUI browser.  Returns True if a browser was
+    successfully launched, False if we're in a headless/SSH environment and
+    the user should open the URL themselves.
+
+    Strategy (in order):
+      1. DISPLAY / WAYLAND_DISPLAY / macOS → use webbrowser.open()
+      2. WSL with Windows browser available → run cmd.exe /c start <url>
+      3. Nothing found → return False (caller prints the URL)
+
+    We deliberately do NOT launch headless Chrome with remote-debugging —
+    that confuses users and is unnecessary since the URL + code is printed.
+    """
+    import os as _os
+    import subprocess as _sp
+    import sys as _sys
+
+    # ── macOS ─────────────────────────────────────────────────────────────────
+    if _sys.platform == "darwin":
+        try:
+            import webbrowser
+            webbrowser.open(url)
+            return True
+        except Exception:
+            return False
+
+    # ── Linux with a live display (GUI or X-forwarding) ──────────────────────
+    display   = _os.environ.get("DISPLAY", "")
+    wayland   = _os.environ.get("WAYLAND_DISPLAY", "")
+    if display or wayland:
+        try:
+            import webbrowser
+            webbrowser.open(url)
+            return True
+        except Exception:
+            return False
+
+    # ── WSL: delegate to Windows browser ─────────────────────────────────────
+    wsl_interop = _os.path.exists("/proc/sys/fs/binfmt_misc/WSLInterop") or \
+                  "microsoft" in _os.uname().release.lower()
+    if wsl_interop:
+        try:
+            _sp.Popen(
+                ["cmd.exe", "/c", "start", "", url],
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+            )
+            return True
+        except Exception:
+            pass
+
+    # ── SSH / pure headless — nothing to open ────────────────────────────────
+    return False
+
+
 def device_flow() -> str:
     """Public alias for _device_flow — run Auth0 Device Flow without the internal exchange."""
     return _device_flow()
@@ -100,54 +155,19 @@ def _device_flow() -> str:
     print("\n" + "="*60)
     print("🔐  Token Flow — Login Required")
     print("="*60)
-    print(f"\n  Opening browser for authentication...")
-    print(f"  URL: {verification_url}")
-    print(f"  Code: {user_code}")
+
+    # Try to auto-open a browser; fall back to displaying the URL
+    opened = _try_open_browser(verification_url)
+    if opened:
+        print(f"\n  ✅ Browser opened for authentication.")
+    else:
+        print(f"\n  👉 Open this URL to log in:")
+        print(f"\n     {verification_url}")
+        print(f"\n  Or enter code:  {user_code}")
+        print(f"  At:             https://{AUTH0_DOMAIN}/activate")
+
     print("\n  Waiting for you to authenticate...")
     print("="*60 + "\n")
-
-    # Auto-open browser — try Chrome headless/GUI, fallback to webbrowser
-    try:
-        import subprocess as _sp
-        # Try to open Chrome. On SSH/headless, use --headless with remote-debugging
-        # so the user can see the page via their local browser pointed at the tunnel.
-        # First try: plain Chrome (works if DISPLAY is set or via forwarding)
-        chrome = None
-        for candidate in ["google-chrome", "google-chrome-stable", "chromium-browser", "chromium"]:
-            try:
-                _sp.run(["which", candidate], check=True, capture_output=True)
-                chrome = candidate
-                break
-            except Exception:
-                continue
-
-        if chrome:
-            import os as _os
-            display = _os.environ.get("DISPLAY", "")
-            if display:
-                # X forwarding available — open normally
-                _sp.Popen([chrome, "--no-sandbox", "--disable-gpu", verification_url],
-                          stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
-                print("  🌐 Chrome opened in your X session.")
-            else:
-                # No display — launch with remote debugging port so user can connect
-                port = 9222
-                _sp.Popen([
-                    chrome,
-                    "--headless=new",
-                    "--no-sandbox",
-                    "--disable-gpu",
-                    f"--remote-debugging-port={port}",
-                    verification_url,
-                ], stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
-                print(f"  🌐 Chrome launched headless (remote debugging on port {port}).")
-                print(f"     SSH tunnel: ssh -L {port}:localhost:{port} <this-server>")
-                print(f"     Then open: http://localhost:{port} in your local browser")
-        else:
-            import webbrowser
-            webbrowser.open(verification_url)
-    except Exception:
-        pass  # fallback — URL is printed above
 
     # Step 2: poll for token
     deadline = time.time() + expires_in
