@@ -110,6 +110,19 @@ def _run_sso(port: int) -> tuple[list, list]:
         if cached:
             print("🔐 SSO: using cached token")
             sso_user[0] = get_cached_user()
+            # Cache may have been written without user info (e.g. seeded via
+            # TOKEN_FLOW_JWT). Try to decode email directly from the JWT payload.
+            if not sso_user[0].get("email"):
+                try:
+                    import base64 as _b64
+                    parts = cached.split(".")
+                    if len(parts) >= 2:
+                        padded = parts[1] + "=" * (-len(parts[1]) % 4)
+                        claim = json.loads(_b64.urlsafe_b64decode(padded))
+                        if claim.get("email"):
+                            sso_user[0] = {"email": claim["email"], "name": claim.get("name", "")}
+                except Exception:
+                    pass
             print(f"✅ Authenticated as {sso_user[0].get('email', 'unknown')}")
         else:
             print("🔐 Authenticating with Auth0 SSO...")
