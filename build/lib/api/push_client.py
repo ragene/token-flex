@@ -25,16 +25,11 @@ import json
 import logging
 import os
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
 log = logging.getLogger(__name__)
 
 _DEFAULT_UI_URL = "https://token-flow.thefreightdawg.com"
-
-# Suppress repeated "no auth token" warnings — warn once, stay quiet until a
-# token is resolved or the push succeeds.
-_warned_no_token: bool = False
 
 
 def _normalize_db_url(db_path: str) -> str:
@@ -113,55 +108,8 @@ def _build_session_data() -> dict:
     return result
 
 
-def _build_token_data(skip_local_api: bool = False) -> dict:
-    """
-    Build token count / status data — single source of truth.
-
-    Strategy (in priority order):
-      1. Fetch from local /tokens API (authoritative — reads actual .jsonl file sizes).
-         Skipped when skip_local_api=True (called from within the server process to
-         avoid a deadlock where the push thread calls back into the same uvicorn loop).
-      2. Fall back to file-based estimation if the local API is unreachable.
-    """
-    import urllib.request as _ur
-
-    port = int(os.environ.get("TOKEN_FLOW_PORT", "8001"))
-    if not skip_local_api:
-        try:
-            req = _ur.Request(f"http://localhost:{port}/tokens")
-            tok = _get_push_token()
-            if tok:
-                req.add_header("Authorization", f"Bearer {tok}")
-            with _ur.urlopen(req, timeout=3) as r:
-                data = json.loads(r.read())
-            # Normalise field names so dashboard consumers see a consistent shape.
-            # /tokens returns:
-            #   session_tokens  = OpenClaw sessions (the main context to watch)
-            #   claude_tokens   = Claude CLI sessions (usually 0)
-            # Dashboard expects:
-            #   active_session_tokens = the big one to display
-            #   idle_session_tokens   = other idle sessions
-            session_tokens = data.get("session_tokens", 0)
-            claude_tokens  = data.get("claude_tokens", 0)
-            return {
-                "total_tokens_approx":   data.get("total_tokens_approx", 0),
-                "session_tokens":        session_tokens,
-                "active_session_tokens": session_tokens,   # maps to dashboard "Local Session"
-                "idle_session_tokens":   claude_tokens,    # Claude CLI sessions (usually 0)
-                "memory_tokens":         data.get("memory_tokens", 0),
-                "session_files":         data.get("session_files", 0),
-                "claude_session_files":  data.get("claude_session_files", 0),
-                "status":                data.get("status", "ok"),
-                "message":               data.get("message", ""),
-                "warn_threshold":        data.get("warn_threshold", 30000),
-                "distill_threshold":     data.get("distill_threshold", 30000),
-                "cached_chunks":         data.get("cached_chunks", 0),
-                "cached_chunk_tokens":   data.get("cached_chunk_tokens", 0),
-            }
-        except Exception:
-            pass  # fall through to file-based fallback
-
-    # ── File-based fallback (local API unreachable) ───────────────────────────
+def _build_token_data() -> dict:
+    """Build token count / status data from local session + memory files."""
     from pathlib import Path
 
     sessions_dir = Path(
@@ -172,8 +120,8 @@ def _build_token_data(skip_local_api: bool = False) -> dict:
         "MEMORY_DIR",
         os.path.expanduser("~/.openclaw/workspace/memory"),
     ))
-    warn    = int(os.environ.get("SMART_MEMORY_WARN_TOKENS",    "30000"))
-    distill = int(os.environ.get("SMART_MEMORY_DISTILL_TOKENS", "30000"))
+    warn      = int(os.environ.get("SMART_MEMORY_WARN_TOKENS",   "30000"))
+    distill   = int(os.environ.get("SMART_MEMORY_DISTILL_TOKENS", "30000"))
 
     def _approx(p: Path) -> int:
         try:
@@ -181,27 +129,57 @@ def _build_token_data(skip_local_api: bool = False) -> dict:
         except Exception:
             return 0
 
-    session_files  = list(sessions_dir.glob("*.jsonl")) if sessions_dir.exists() else []
-    session_tokens = sum(_approx(f) for f in session_files)
+    session_files = list(sessions_dir.glob("*.jsonl")) if sessions_dir.exists() else []
 
-    # Sum all memory files (not just today's)
-    memory_tokens = sum(_approx(f) for f in memory_dir.glob("*.md")) if memory_dir.exists() else 0
+    # Use totalTokens from sessions.json metadata — accurate count tracked by OpenClaw.
+    # Fall back to chars//4 heuristic only when metadata is absent.
+    _active_sid    = None
+    _active_tokens = 0
+    _idle_tokens   = 0
+    try:
+        import json as _j
+        _sj = sessions_dir / "sessions.json"
+        if _sj.exists():
+            _meta = _j.loads(_sj.read_text(errors="ignore"))
+            for _key, _sm in _meta.items():
+                _sid = _sm.get("sessionId")
+                _tok = _sm.get("totalTokens") or 0
+                if not _tok:
+                    # fallback: estimate from file size
+                    _sf = sessions_dir / f"{_sid}.jsonl" if _sid else None
+                    _tok = _approx(_sf) if _sf else 0
+                # Active session = the main agent session
+                if _key == "agent:main:main":
+                    _active_sid    = _sid
+                    _active_tokens = _tok
+                else:
+                    _idle_tokens += _tok
+    except Exception:
+        # Full fallback — sum all session files by chars//4
+        for f in session_files:
+            _idle_tokens += _approx(f)
 
-    total     = session_tokens + memory_tokens
-    clearable = memory_tokens  # active session isn't clearable without distill
+    session_tokens = _active_tokens + _idle_tokens
 
+    today = datetime.utcnow().date().isoformat()
+    memory_tokens = _approx(memory_dir / f"{today}.md")
+    total = session_tokens + memory_tokens
+
+    # Status is based on idle (clearable) sessions + memory only.
+    # The active session grows continuously and shouldn't trigger a distill alarm by itself.
+    clearable = _idle_tokens + memory_tokens
     if clearable >= distill:
         status, msg = "critical", f"⚠️ Clearable context large (~{clearable:,} tokens). Distill NOW."
     elif clearable >= warn:
-        status, msg = "warning",  f"🟡 Clearable context growing (~{clearable:,} tokens). Consider distilling."
+        status, msg = "warning", f"🟡 Clearable context growing (~{clearable:,} tokens). Consider distilling."
     else:
-        status, msg = "ok",       f"✅ Context healthy (~{clearable:,} clearable tokens). Session: ~{session_tokens:,} tokens."
+        status, msg = "ok", f"✅ Context healthy (~{clearable:,} clearable tokens). Active session: ~{_active_tokens:,} tokens."
 
     return {
         "total_tokens_approx":   total,
         "session_tokens":        session_tokens,
-        "active_session_tokens": session_tokens,
-        "idle_session_tokens":   0,
+        "active_session_tokens": _active_tokens,
+        "idle_session_tokens":   _idle_tokens,
         "memory_tokens":         memory_tokens,
         "session_files":         len(session_files),
         "status":                status,
@@ -298,11 +276,11 @@ def _extract_session_usage(owner_email: Optional[str] = None, after: Optional[st
 
 def _build_snapshot(db_path: str) -> dict:
     """Read current state from DB and return a full snapshot dict."""
+    from db.schema import init_db
+
     from db.pg_compat import connect as pg_connect
-    # Do NOT call init_db here — it write-locks SQLite and deadlocks when called
-    # from the daemon push thread while the main uvicorn thread holds the DB.
-    # Schema is already initialised at startup; _build_snapshot is read-only.
     c = pg_connect(_normalize_db_url(db_path))
+    init_db(c)
     try:
         # Token usage summary — chat/session ops only (excludes engine ops like
         # summarize/ingest_summarize/ingest_git which belong in the Activity view).
@@ -325,15 +303,7 @@ def _build_snapshot(db_path: str) -> dict:
         grand_calls  = sum(r["total_calls"]  for r in summary_rows)
         grand_cost   = round(sum(r["cost_usd"] for r in summary_rows), 6)
 
-        # Chunk cache — send totals + latest 100 rows for display.
-        # Totals are sent separately so the dashboard can show accurate counts
-        # even though we only ship 100 rows in the payload.
-        chunk_totals = c.execute(
-            "SELECT COUNT(*), COALESCE(SUM(token_count),0) FROM chunk_cache"
-        ).fetchone()
-        chunk_total_count  = int(chunk_totals[0] or 0)
-        chunk_total_tokens = int(chunk_totals[1] or 0)
-
+        # Latest 100 chunks
         chunk_rows = c.execute("""
             SELECT id, source_label, chunk_index, token_count,
                    composite_score, fact_score, preference_score, intent_score,
@@ -424,61 +394,21 @@ def _build_snapshot(db_path: str) -> dict:
     finally:
         c.close()
 
-    # skip_local_api=True: called from within the server process (main.py push loop /
-    # token_data router) — avoid deadlock by not hitting localhost:PORT/tokens.
-    # The file-based fallback is used instead, which is fine since the server
-    # already has direct access to session files.
-    # Prefer RemotePusher for the tokens dict — it hits /tokens API directly
-    # (authoritative, no file I/O) without the SQLite/GIL deadlock risk.
-    # Fall back to file-based _build_token_data only if the local service is down.
-    token_data: dict = {}
-    try:
-        from api.remote_push import RemotePusher as _RP
-        token_data = _RP()._fetch_tokens()
-        # Normalise shape — prefer explicit active/idle fields now exposed by /tokens
-        _st     = token_data.get("session_tokens", 0)
-        _active = token_data.get("active_session_tokens") or _st
-        _idle   = token_data.get("idle_session_tokens") or token_data.get("claude_tokens", 0)
-        token_data = {
-            "total_tokens_approx":   token_data.get("total_tokens_approx", 0),
-            "session_tokens":        _st,
-            "active_session_tokens": _active,
-            "idle_session_tokens":   _idle,
-            "memory_tokens":         token_data.get("memory_tokens", 0),
-            "session_files":         token_data.get("session_files", 0),
-            "claude_session_files":  token_data.get("claude_session_files", 0),
-            "status":                token_data.get("status", "ok"),
-            "message":               token_data.get("message", ""),
-            "warn_threshold":        token_data.get("warn_threshold", 30000),
-            "distill_threshold":     token_data.get("distill_threshold", 30000),
-            "cached_chunks":         token_data.get("cached_chunks", 0),
-            "cached_chunk_tokens":   token_data.get("cached_chunk_tokens", 0),
-        }
-    except Exception:
-        token_data = _build_token_data(skip_local_api=True)
-
-    # Always stamp the real chunk totals into the tokens dict so the dashboard
-    # uses accurate counts (not len(chunks) which is capped at 100).
-    token_data["cached_chunks"]       = chunk_total_count
-    token_data["cached_chunk_tokens"] = chunk_total_tokens
-
     return {
         "ts": datetime.utcnow().isoformat() + "Z",
-        "owner_email": _get_owner_email(),
+        "owner_email": _get_owner_email(),   # tags snapshot with local user identity
         "summary": {
             "rows": summary_rows,
             "grand_total_tokens": grand_tokens,
             "grand_total_calls":  grand_calls,
             "grand_cost_usd":     grand_cost,
         },
-        "chunks":             chunks,
-        "chunk_total_count":  chunk_total_count,   # real total (not capped at 100)
-        "chunk_total_tokens": chunk_total_tokens,
+        "chunks":          chunks,
         "events":          events,
         "memory_entries":  memory_entries,
         "pipeline_events": pipeline_events,
         "session":         _build_session_data(),
-        "tokens":          token_data,
+        "tokens":          _build_token_data(),
     }
 
 
@@ -588,69 +518,33 @@ def push_snapshot(
     """
     POST a snapshot to the token-flow-ui's /token-data/push endpoint.
 
-    Uses httpx (supports HTTP/2) to avoid urllib hanging on TLS ALPN negotiation
-    with HTTP/2-only frontends (Envoy/nginx).
-
     Args:
         db_path:  Path to the SQLite DB (used to build the snapshot if payload is None).
-        ui_url:   Base URL override. Defaults to TOKEN_FLOW_UI_URL env var.
+        ui_url:   Base URL override. Defaults to TOKEN_FLOW_UI_URL env var or
+                  https://token-flow-api.thefreightdawg.com.
         payload:  Pre-built snapshot dict. If None, a fresh snapshot is built from DB.
     """
+    import urllib.request
+
     base = (ui_url or os.environ.get("TOKEN_FLOW_UI_URL", _DEFAULT_UI_URL)).rstrip("/")
     endpoint = f"{base}/token-data/push"
 
-    global _warned_no_token
     try:
         data = payload if payload is not None else _build_snapshot(db_path)
-
-        # Always write snapshot to local push_cache so /tokens has fresh data
-        # (including cached_chunks) regardless of remote push success.
-        try:
-            import sqlite3 as _sq
-            _db_file = db_path.replace("sqlite:///", "") if db_path.startswith("sqlite") else \
-                os.environ.get("TOKEN_FLOW_DB", str(Path.home() / ".openclaw/data/token_flow.db"))
-            _lc = _sq.connect(_db_file)
-            try:
-                _lc.execute(
-                    """INSERT INTO push_cache (id, payload, updated_at)
-                       VALUES (1, ?, datetime('now'))
-                       ON CONFLICT (id) DO UPDATE SET
-                           payload    = EXCLUDED.payload,
-                           updated_at = EXCLUDED.updated_at""",
-                    (json.dumps(data),),
-                )
-                _lc.commit()
-            finally:
-                _lc.close()
-        except Exception as _lce:
-            log.debug("push_snapshot: local cache write failed (non-fatal): %s", _lce)
-
+        body = json.dumps(data).encode()
+        headers = {"Content-Type": "application/json"}
         token = _get_push_token()
-        if not token:
-            if not _warned_no_token:
-                log.warning("push_snapshot: no auth token available — skipping push")
-                _warned_no_token = True
-            return
-        if _warned_no_token:
-            log.info("push_snapshot: auth token now available — push resuming")
-            _warned_no_token = False
-
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {token}",
-        }
-
-        try:
-            import httpx as _httpx
-            with _httpx.Client(timeout=8, http2=False) as _client:
-                resp = _client.post(endpoint, content=json.dumps(data).encode(), headers=headers)
-            log.debug("push_snapshot → %s  status=%s", endpoint, resp.status_code)
-        except ImportError:
-            # httpx not available — fall back to urllib (may hang on HTTP/2 hosts)
-            import urllib.request as _ur
-            req = _ur.Request(endpoint, data=json.dumps(data).encode(), headers=headers, method="POST")
-            with _ur.urlopen(req, timeout=8) as resp:
-                log.debug("push_snapshot → %s  status=%s", endpoint, resp.status)
-
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        else:
+            log.warning("push_snapshot: no auth token available — push may be rejected (401)")
+        req = urllib.request.Request(
+            endpoint,
+            data=body,
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            log.debug("push_snapshot → %s  status=%s", endpoint, resp.status)
     except Exception as exc:
         log.debug("push_snapshot failed (non-fatal): %s", exc)

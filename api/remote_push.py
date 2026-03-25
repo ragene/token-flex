@@ -96,12 +96,14 @@ class RemotePusher:
         # Normalise to the shape the dashboard expects
         session_tokens = tokens_raw.get("session_tokens", 0)
         claude_tokens  = tokens_raw.get("claude_tokens", 0)
+        active_tokens  = tokens_raw.get("active_session_tokens") or session_tokens
+        idle_tokens    = tokens_raw.get("idle_session_tokens") or claude_tokens
 
         tokens = {
             "total_tokens_approx":   tokens_raw.get("total_tokens_approx", 0),
             "session_tokens":        session_tokens,
-            "active_session_tokens": session_tokens,   # dashboard "Local Session"
-            "idle_session_tokens":   claude_tokens,
+            "active_session_tokens": active_tokens,
+            "idle_session_tokens":   idle_tokens,
             "memory_tokens":         tokens_raw.get("memory_tokens", 0),
             "session_files":         tokens_raw.get("session_files", 0),
             "claude_session_files":  tokens_raw.get("claude_session_files", 0),
@@ -166,10 +168,36 @@ class RemotePusher:
                 t["cached_chunks"],
                 t["status"],
             )
+            # Also write snapshot to local push_cache so /tokens has fresh data.
+            self._write_local_cache(payload)
             return r.is_success
         except Exception as e:
             log.warning("remote_push: POST failed: %s", e)
             return False
+
+    def _write_local_cache(self, payload: dict) -> None:
+        """Write the push snapshot to the local push_cache table."""
+        try:
+            import sqlite3 as _sq
+            db_path = os.environ.get(
+                "TOKEN_FLOW_DB",
+                str(Path.home() / ".openclaw/data/token_flow.db")
+            )
+            c = _sq.connect(db_path)
+            try:
+                c.execute(
+                    """INSERT INTO push_cache (id, payload, updated_at)
+                       VALUES (1, ?, datetime('now'))
+                       ON CONFLICT (id) DO UPDATE SET
+                           payload    = EXCLUDED.payload,
+                           updated_at = EXCLUDED.updated_at""",
+                    (json.dumps(payload),),
+                )
+                c.commit()
+            finally:
+                c.close()
+        except Exception as e:
+            log.debug("remote_push: local cache write failed (non-fatal): %s", e)
 
     # ── Loop ─────────────────────────────────────────────────────────────────
 

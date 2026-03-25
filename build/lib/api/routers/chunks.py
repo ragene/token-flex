@@ -27,8 +27,6 @@ class TokenStats(BaseModel):
     total_tokens_approx: int
     session_tokens: int
     claude_tokens: int
-    active_session_tokens: int = 0
-    idle_session_tokens: int = 0
     memory_tokens: int
     session_files: int
     claude_session_files: int
@@ -150,14 +148,10 @@ async def token_stats(request: Request) -> TokenStats:
             ).fetchone()
         finally:
             conn.close()
-        _active = t.get("active_session_tokens") or t.get("session_tokens", 0)
-        _idle   = t.get("idle_session_tokens") or t.get("claude_tokens", 0)
         return TokenStats(
             total_tokens_approx   = t.get("total_tokens_approx", 0),
             session_tokens        = t.get("session_tokens", 0),
-            claude_tokens         = _idle,
-            active_session_tokens = _active,
-            idle_session_tokens   = _idle,
+            claude_tokens         = t.get("claude_tokens") or t.get("active_session_tokens", 0),
             memory_tokens         = t.get("memory_tokens", 0),
             session_files         = t.get("session_files", 0),
             claude_session_files  = t.get("claude_session_files") or t.get("claude_files", 0),
@@ -223,35 +217,10 @@ async def token_stats(request: Request) -> TokenStats:
     finally:
         conn.close()
 
-    # Split active (main session) vs idle using sessions.json metadata
-    import json as _j
-    _active_tokens = 0
-    _idle_tokens   = 0
-    try:
-        _sj = SESSIONS_DIR / "sessions.json"
-        if _sj.exists():
-            _meta = _j.loads(_sj.read_text(errors="ignore"))
-            for _key, _sm in _meta.items():
-                _sid  = _sm.get("sessionId")
-                _tok  = _sm.get("totalTokens") or 0
-                if not _tok:
-                    _sf = SESSIONS_DIR / f"{_sid}.jsonl" if _sid else None
-                    _tok = _approx_tokens(_sf) if _sf and _sf.exists() else 0
-                if _key == "agent:main:main":
-                    _active_tokens = _tok
-                else:
-                    _idle_tokens += _tok
-        else:
-            _active_tokens = session_tokens
-    except Exception:
-        _active_tokens = session_tokens
-
     return TokenStats(
         total_tokens_approx=total,
         session_tokens=session_tokens,
         claude_tokens=claude_tokens,
-        active_session_tokens=_active_tokens,
-        idle_session_tokens=_idle_tokens,
         memory_tokens=memory_tokens,
         session_files=len(session_files),
         claude_session_files=len(claude_files),
