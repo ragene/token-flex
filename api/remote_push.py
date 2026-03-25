@@ -114,19 +114,15 @@ class RemotePusher:
         }
 
         return {
-            "ts":          datetime.now(timezone.utc).isoformat(),
-            "owner_email": self._get_owner_email(),
-            "tokens":      tokens,
-            # Empty collections — chunk/event data is only in the full snapshot
-            # from push_client._build_snapshot; this lightweight pusher focuses
-            # on keeping token counts fresh.
-            "summary":        {"rows": [], "grand_total_tokens": 0,
-                               "grand_total_calls": 0, "grand_cost_usd": 0.0},
-            "chunks":         [],
-            "events":         [],
-            "memory_entries": [],
-            "pipeline_events": [],
-            "session":        {},
+            "ts":                  datetime.now(timezone.utc).isoformat(),
+            "owner_email":         self._get_owner_email(),
+            "tokens":              tokens,
+            # These totals come from /tokens and are always accurate.
+            # The push handler on ECS will merge these into existing push_cache
+            # so chunk rows are preserved even though we don't send them here.
+            "chunk_total_count":   tokens.get("cached_chunks", 0),
+            "chunk_total_tokens":  tokens.get("cached_chunk_tokens", 0),
+            # Omit chunks/events/summary — ECS merge logic keeps existing values.
         }
 
     # ── Remote push ───────────────────────────────────────────────────────────

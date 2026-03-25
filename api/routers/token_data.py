@@ -625,8 +625,25 @@ async def push_snapshot(body: PushSnapshotIn, request: Request) -> dict:
     if not payload.get("ts"):
         payload["ts"] = datetime.utcnow().isoformat() + "Z"
 
-    # Persist to DB so new WS connections get real data after ECS restarts.
-    # UPDATE first (no gap), INSERT if no row exists yet.
+    # Merge with existing push_cache: keep chunks/events/summary from the
+    # previous snapshot when the new payload omits them (e.g. lightweight
+    # RemotePusher only sends tokens — we don't want to wipe chunk data).
+    try:
+        database_url: str = request.app.state.database_url
+        existing = _load_push_cache(database_url) or {}
+        for field in ("chunks", "chunk_total_count", "chunk_total_tokens",
+                      "events", "summary", "memory_entries", "pipeline_events"):
+            incoming = payload.get(field)
+            if not incoming and existing.get(field):
+                payload[field] = existing[field]
+        # Always use the freshest tokens dict (from incoming push)
+        # but keep owner_email if the incoming push didn't set it.
+        if not payload.get("owner_email") and existing.get("owner_email"):
+            payload["owner_email"] = existing["owner_email"]
+    except Exception as exc:
+        log.debug("push_cache merge failed (non-fatal): %s", exc)
+
+    # Persist merged payload to DB.
     try:
         database_url: str = request.app.state.database_url
         conn = _conn(request)
