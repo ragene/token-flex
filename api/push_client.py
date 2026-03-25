@@ -427,7 +427,34 @@ def _build_snapshot(db_path: str) -> dict:
     # token_data router) — avoid deadlock by not hitting localhost:PORT/tokens.
     # The file-based fallback is used instead, which is fine since the server
     # already has direct access to session files.
-    token_data = _build_token_data(skip_local_api=True)
+    # Prefer RemotePusher for the tokens dict — it hits /tokens API directly
+    # (authoritative, no file I/O) without the SQLite/GIL deadlock risk.
+    # Fall back to file-based _build_token_data only if the local service is down.
+    token_data: dict = {}
+    try:
+        from api.remote_push import RemotePusher as _RP
+        token_data = _RP()._fetch_tokens()
+        # Normalise shape
+        _st = token_data.get("session_tokens", 0)
+        _ct = token_data.get("claude_tokens", 0)
+        token_data = {
+            "total_tokens_approx":   token_data.get("total_tokens_approx", 0),
+            "session_tokens":        _st,
+            "active_session_tokens": _st,
+            "idle_session_tokens":   _ct,
+            "memory_tokens":         token_data.get("memory_tokens", 0),
+            "session_files":         token_data.get("session_files", 0),
+            "claude_session_files":  token_data.get("claude_session_files", 0),
+            "status":                token_data.get("status", "ok"),
+            "message":               token_data.get("message", ""),
+            "warn_threshold":        token_data.get("warn_threshold", 30000),
+            "distill_threshold":     token_data.get("distill_threshold", 30000),
+            "cached_chunks":         token_data.get("cached_chunks", 0),
+            "cached_chunk_tokens":   token_data.get("cached_chunk_tokens", 0),
+        }
+    except Exception:
+        token_data = _build_token_data(skip_local_api=True)
+
     # Always stamp the real chunk totals into the tokens dict so the dashboard
     # uses accurate counts (not len(chunks) which is capped at 100).
     token_data["cached_chunks"]       = chunk_total_count
