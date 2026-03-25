@@ -1,8 +1,48 @@
 #!/usr/bin/env bash
 # token-flow service manager
 # Usage: manage.sh [start|stop|restart|status|install-deps]
-# Supports: Linux, macOS
+# Supports: Linux (systemd user service), macOS (nohup fallback)
 set -euo pipefail
+
+# ── Systemd delegation (Linux only) ──────────────────────────────────────────
+# On Linux, delegate start/stop/restart/status to the systemd user service so
+# the process is fully detached from any terminal/TUI session and auto-restarts
+# on failure.  Falls through to the legacy nohup path on macOS or if systemd
+# is unavailable.
+_systemd_available() {
+  [[ "$(uname -s)" == "Linux" ]] && command -v systemctl &>/dev/null && \
+    systemctl --user list-units &>/dev/null 2>&1
+}
+
+_systemd_delegate() {
+  local subcmd="$1"
+  case "$subcmd" in
+    start)
+      systemctl --user start token-flow
+      sleep 2
+      systemctl --user status token-flow --no-pager
+      ;;
+    stop)
+      systemctl --user stop token-flow
+      echo "✅ token-flow stopped."
+      ;;
+    restart)
+      systemctl --user restart token-flow
+      sleep 2
+      systemctl --user status token-flow --no-pager
+      ;;
+    status)
+      systemctl --user status token-flow --no-pager
+      ;;
+  esac
+}
+
+_early_cmd="${1:-status}"
+if _systemd_available && [[ "$_early_cmd" =~ ^(start|stop|restart|status)$ ]]; then
+  _systemd_delegate "$_early_cmd"
+  exit $?
+fi
+# ─────────────────────────────────────────────────────────────────────────────
 
 PORT="${TOKEN_FLOW_PORT:-8001}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
