@@ -46,14 +46,28 @@ def _python() -> str:
 
 def _tf_server() -> str:
     """Absolute path to the tf-server script (same env as current Python)."""
-    # Try scripts dir next to the interpreter first
-    scripts = Path(sys.executable).parent
-    for name in ("tf-server", "tf-server.exe"):
-        p = scripts / name
-        if p.exists():
-            return str(p)
-    # Fallback: derive from package location
-    return str(Path(sys.executable).parent / "tf-server")
+    import shutil
+
+    # 1. Already on PATH?
+    found = shutil.which("tf-server")
+    if found:
+        return found
+
+    # 2. Scripts dir next to the interpreter (venv / system)
+    for scripts in (
+        Path(sys.executable).parent,                          # venv: bin/
+        Path(sys.executable).parent.parent / "bin",          # venv alt
+        Path.home() / ".local" / "bin",                      # pip install --user
+        Path("/usr/local/bin"),
+        Path("/usr/bin"),
+    ):
+        for name in ("tf-server", "tf-server.exe"):
+            p = scripts / name
+            if p.exists():
+                return str(p)
+
+    # 3. Fallback: run as module (always works if package is installed)
+    return f"{sys.executable} -m token_flow._cli_runner"
 
 
 def _env_file() -> Path | None:
@@ -106,6 +120,13 @@ def install_linux() -> None:
     if ef:
         env_file_line = f"EnvironmentFile={ef}"
 
+    # tf may be "python3 -m token_flow._cli_runner" (fallback) — systemd needs
+    # an absolute binary path so split into ExecStart= args correctly.
+    if tf.startswith(sys.executable) and " " in tf:
+        exec_start = tf  # e.g. /usr/bin/python3 -m token_flow._cli_runner start
+    else:
+        exec_start = f"{tf} start"
+
     unit = textwrap.dedent(f"""\
         [Unit]
         Description=Token Flow API
@@ -122,7 +143,7 @@ def install_linux() -> None:
         Environment=S3_BUCKET={env.get('S3_BUCKET', 'smart-memory')}
         Environment=OWNER_EMAIL={env.get('OWNER_EMAIL', '')}
         Environment=PYTHONUNBUFFERED=1
-        ExecStart={tf} start
+        ExecStart={exec_start}
         Restart=on-failure
         RestartSec=5
 
