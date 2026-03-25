@@ -1,2 +1,0 @@
-[console_scripts]
-tf-server = token_flow._cli:main

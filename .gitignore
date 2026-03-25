@@ -3,3 +3,10 @@
 
 __pycache__/
 *.pyc
+*.pyo
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.egg
