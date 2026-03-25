@@ -112,25 +112,27 @@ def _build_session_data() -> dict:
     return result
 
 
-def _build_token_data() -> dict:
+def _build_token_data(skip_local_api: bool = False) -> dict:
     """
     Build token count / status data — single source of truth.
 
     Strategy (in priority order):
-      1. Fetch from local /tokens API (same logic as the dashboard's GET /tokens).
-         This is the authoritative value since it reads actual .jsonl file sizes.
+      1. Fetch from local /tokens API (authoritative — reads actual .jsonl file sizes).
+         Skipped when skip_local_api=True (called from within the server process to
+         avoid a deadlock where the push thread calls back into the same uvicorn loop).
       2. Fall back to file-based estimation if the local API is unreachable.
     """
     import urllib.request as _ur
 
     port = int(os.environ.get("TOKEN_FLOW_PORT", "8001"))
-    try:
-        req = _ur.Request(f"http://localhost:{port}/tokens")
-        tok = _get_push_token()
-        if tok:
-            req.add_header("Authorization", f"Bearer {tok}")
-        with _ur.urlopen(req, timeout=3) as r:
-            data = json.loads(r.read())
+    if not skip_local_api:
+        try:
+            req = _ur.Request(f"http://localhost:{port}/tokens")
+            tok = _get_push_token()
+            if tok:
+                req.add_header("Authorization", f"Bearer {tok}")
+            with _ur.urlopen(req, timeout=3) as r:
+                data = json.loads(r.read())
             # Normalise field names so dashboard consumers see a consistent shape.
             # /tokens returns:
             #   session_tokens  = OpenClaw sessions (the main context to watch)
@@ -155,8 +157,8 @@ def _build_token_data() -> dict:
                 "cached_chunks":         data.get("cached_chunks", 0),
                 "cached_chunk_tokens":   data.get("cached_chunk_tokens", 0),
             }
-    except Exception:
-        pass  # fall through to file-based fallback
+        except Exception:
+            pass  # fall through to file-based fallback
 
     # ── File-based fallback (local API unreachable) ───────────────────────────
     from pathlib import Path
@@ -295,11 +297,11 @@ def _extract_session_usage(owner_email: Optional[str] = None, after: Optional[st
 
 def _build_snapshot(db_path: str) -> dict:
     """Read current state from DB and return a full snapshot dict."""
-    from db.schema import init_db
-
     from db.pg_compat import connect as pg_connect
+    # Do NOT call init_db here — it write-locks SQLite and deadlocks when called
+    # from the daemon push thread while the main uvicorn thread holds the DB.
+    # Schema is already initialised at startup; _build_snapshot is read-only.
     c = pg_connect(_normalize_db_url(db_path))
-    init_db(c)
     try:
         # Token usage summary — chat/session ops only (excludes engine ops like
         # summarize/ingest_summarize/ingest_git which belong in the Activity view).
@@ -421,7 +423,11 @@ def _build_snapshot(db_path: str) -> dict:
     finally:
         c.close()
 
-    token_data = _build_token_data()
+    # skip_local_api=True: called from within the server process (main.py push loop /
+    # token_data router) — avoid deadlock by not hitting localhost:PORT/tokens.
+    # The file-based fallback is used instead, which is fine since the server
+    # already has direct access to session files.
+    token_data = _build_token_data(skip_local_api=True)
     # Always stamp the real chunk totals into the tokens dict so the dashboard
     # uses accurate counts (not len(chunks) which is capped at 100).
     token_data["cached_chunks"]       = chunk_total_count
@@ -553,42 +559,46 @@ def push_snapshot(
     """
     POST a snapshot to the token-flow-ui's /token-data/push endpoint.
 
+    Uses httpx (supports HTTP/2) to avoid urllib hanging on TLS ALPN negotiation
+    with HTTP/2-only frontends (Envoy/nginx).
+
     Args:
         db_path:  Path to the SQLite DB (used to build the snapshot if payload is None).
-        ui_url:   Base URL override. Defaults to TOKEN_FLOW_UI_URL env var or
-                  https://token-flow-api.thefreightdawg.com.
+        ui_url:   Base URL override. Defaults to TOKEN_FLOW_UI_URL env var.
         payload:  Pre-built snapshot dict. If None, a fresh snapshot is built from DB.
     """
-    import urllib.request
-
     base = (ui_url or os.environ.get("TOKEN_FLOW_UI_URL", _DEFAULT_UI_URL)).rstrip("/")
     endpoint = f"{base}/token-data/push"
 
     global _warned_no_token
     try:
         data = payload if payload is not None else _build_snapshot(db_path)
-        body = json.dumps(data).encode()
-        headers = {"Content-Type": "application/json"}
         token = _get_push_token()
-        if token:
-            if _warned_no_token:
-                log.info("push_snapshot: auth token now available — push resuming")
-                _warned_no_token = False
-            headers["Authorization"] = f"Bearer {token}"
-        else:
+        if not token:
             if not _warned_no_token:
-                log.warning("push_snapshot: no auth token available — push will be retried silently until one is found")
+                log.warning("push_snapshot: no auth token available — skipping push")
                 _warned_no_token = True
-            # Skip the push entirely rather than sending an unauthenticated request
-            # that will 401 and waste bandwidth every 30s.
             return
-        req = urllib.request.Request(
-            endpoint,
-            data=body,
-            headers=headers,
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=4) as resp:
-            log.debug("push_snapshot → %s  status=%s", endpoint, resp.status)
+        if _warned_no_token:
+            log.info("push_snapshot: auth token now available — push resuming")
+            _warned_no_token = False
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        }
+
+        try:
+            import httpx as _httpx
+            with _httpx.Client(timeout=8, http2=False) as _client:
+                resp = _client.post(endpoint, content=json.dumps(data).encode(), headers=headers)
+            log.debug("push_snapshot → %s  status=%s", endpoint, resp.status_code)
+        except ImportError:
+            # httpx not available — fall back to urllib (may hang on HTTP/2 hosts)
+            import urllib.request as _ur
+            req = _ur.Request(endpoint, data=json.dumps(data).encode(), headers=headers, method="POST")
+            with _ur.urlopen(req, timeout=8) as resp:
+                log.debug("push_snapshot → %s  status=%s", endpoint, resp.status)
+
     except Exception as exc:
         log.debug("push_snapshot failed (non-fatal): %s", exc)

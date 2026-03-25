@@ -142,6 +142,7 @@ def install_linux() -> None:
         Environment=SESSIONS_DIR={env.get('SESSIONS_DIR', str(HOME / '.openclaw/agents/main/sessions'))}
         Environment=S3_BUCKET={env.get('S3_BUCKET', 'smart-memory')}
         Environment=OWNER_EMAIL={env.get('OWNER_EMAIL', '')}
+        Environment=SKIP_STARTUP_AUTH=false
         Environment=PYTHONUNBUFFERED=1
         ExecStart={exec_start}
         Restart=on-failure
@@ -264,7 +265,7 @@ def _win_xml(tf: str, env: dict[str, str]) -> str:
         "TOKEN_FLOW_PORT", "TOKEN_FLOW_DB", "WORKSPACE", "MEMORY_DIR",
         "SESSIONS_DIR", "S3_BUCKET", "AUTH0_DOMAIN", "AUTH0_CLIENT_ID",
         "SECRET_KEY", "TOKEN_FLOW_UI_URL", "ANTHROPIC_API_KEY",
-        "OWNER_EMAIL", "PYTHONUNBUFFERED",
+        "OWNER_EMAIL", "PYTHONUNBUFFERED", "SKIP_STARTUP_AUTH",
     ]
     set_cmds = " && ".join(
         f'set "{k}={env.get(k, "1" if k == "PYTHONUNBUFFERED" else "")}"'

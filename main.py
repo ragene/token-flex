@@ -165,27 +165,20 @@ if __name__ == "__main__":
     _is_remote = _remote_ui_url and "localhost" not in _remote_ui_url and "127.0.0.1" not in _remote_ui_url
 
     if _is_remote:
+        import subprocess as _subproc
+        from pathlib import Path as _Path
+        _remote_push_script = str(_Path(__file__).parent / "api" / "remote_push.py")
+
         def _remote_push_loop():
-            import time
-            from api.push_client import push_snapshot
-
-            # Wait for server to be ready before first push
-            deadline = time.time() + 30
-            while time.time() < deadline:
-                try:
-                    import urllib.request
-                    urllib.request.urlopen(f"http://localhost:{PORT}/health", timeout=2)
-                    break
-                except Exception:
-                    time.sleep(2)
-
-            print(f"🚀 Remote push loop started → {_remote_ui_url} (immediate + every 30s)")
-            while True:
-                try:
-                    push_snapshot(DATABASE_URL, ui_url=_remote_ui_url)
-                except Exception as exc:
-                    print(f"⚠️  Remote push failed (non-fatal): {exc}")
-                time.sleep(30)  # first iteration runs immediately, then every 30s
+            try:
+                proc = _subproc.Popen(
+                    [sys.executable, _remote_push_script, str(PORT), _remote_ui_url, "10"],
+                    stdout=None, stderr=None,
+                )
+                ret = proc.wait()
+                print(f"⚠️  Push worker exited with code {ret}", flush=True)
+            except Exception as e:
+                print(f"⚠️  Push worker failed to start: {e}", flush=True)
 
         threading.Thread(target=_remote_push_loop, daemon=True).start()
     else:

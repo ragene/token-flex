@@ -237,7 +237,9 @@ def connect(database_url: str):
     if database_url.startswith("sqlite"):
         import sqlite3 as _sq
         path = database_url.replace("sqlite:///", "")
-        return _SqliteConnection(_sq.connect(path))
+        # check_same_thread=False: allow connections from daemon threads (push loop).
+        # timeout=5: don't hang forever waiting for a write lock; raise after 5s.
+        return _SqliteConnection(_sq.connect(path, check_same_thread=False, timeout=5))
     pg_conn = psycopg2.connect(database_url, connect_timeout=10)
     pg_conn.autocommit = False
     return Connection(pg_conn)

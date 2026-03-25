@@ -199,33 +199,35 @@ def _launch_session_thread(port: int, auth0_token: list, sso_user: list):
 
 
 def _launch_push_loop(port: int, db_url: str):
-    """Periodic push loop to remote TOKEN_FLOW_UI_URL (if configured)."""
+    """
+    Spawn api.remote_push as a subprocess — fully decoupled from the uvicorn
+    GIL and SQLite connections in the main process.
+    """
     remote_ui = os.environ.get("TOKEN_FLOW_UI_URL", "").strip().rstrip("/")
     if not remote_ui or "localhost" in remote_ui or "127.0.0.1" in remote_ui:
         print("ℹ️  Remote push loop skipped (TOKEN_FLOW_UI_URL not set or is localhost)")
         return
 
-    def _loop():
-        deadline = time.time() + 30
-        while time.time() < deadline:
-            try:
-                urllib.request.urlopen(f"http://localhost:{port}/health", timeout=2)
-                break
-            except Exception:
-                time.sleep(2)
-        print(f"🚀 Remote push loop started → {remote_ui} (immediate + every 10s)")
-        while True:
-            try:
-                from api.push_client import push_snapshot
-                push_snapshot(db_url, ui_url=remote_ui)
-            except Exception as e:
-                print(f"⚠️  Remote push failed (non-fatal): {e}")
-            time.sleep(10)
+    import subprocess as _sp
+    from pathlib import Path as _Path
 
-    threading.Thread(target=_loop, daemon=True).start()
+    remote_push_module = str(_Path(__file__).parent.parent / "api" / "remote_push.py")
+
+    def _run():
+        try:
+            proc = _sp.Popen(
+                [sys.executable, remote_push_module,
+                 str(port), remote_ui, "10"],
+                stdout=None, stderr=None,  # inherited by journald via systemd
+            )
+            ret = proc.wait()
+            print(f"⚠️  Push worker exited with code {ret}", flush=True)
+        except Exception as e:
+            print(f"⚠️  Push worker failed to start: {e}", flush=True)
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
-# ── Sub-commands ──────────────────────────────────────────────────────────────
 
 def cmd_start(args: argparse.Namespace) -> int:
     if _is_running():
