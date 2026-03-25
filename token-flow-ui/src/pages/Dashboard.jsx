@@ -4,7 +4,7 @@ import TokenMeter from '../components/TokenMeter.jsx'
 import { postDistillAndClear, getCurrentUser } from '../api.js'
 
 const BASE_URL = import.meta.env.VITE_API_URL || ''
-const STREAM_INTERVAL = 30 // seconds between client-initiated pings for fresh data
+const STREAM_INTERVAL = 10 // seconds between client-initiated pings for fresh data
 const _WS_BASE = BASE_URL
   ? BASE_URL.replace(/^http/, 'ws') + '/token-data/ws'
   : (window.location.protocol === 'https:' ? 'wss' : 'ws') + '://' + window.location.host + '/token-data/ws'
@@ -177,10 +177,16 @@ export default function Dashboard() {
           {/* Breakdown Stats */}
           <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 24 }}>
             <StatCard
-              label="Session Tokens"
-              value={data.session_tokens || 0}
-              sub={`${data.session_files || 0} files`}
+              label="Active Session"
+              value={data.active_session_tokens || 0}
+              sub="current session"
               color="#60a5fa"
+            />
+            <StatCard
+              label="Idle Sessions"
+              value={data.idle_session_tokens || 0}
+              sub={`${data.session_files || 0} files`}
+              color="#818cf8"
             />
             <StatCard
               label="Memory Tokens"

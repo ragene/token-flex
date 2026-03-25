@@ -213,14 +213,14 @@ def _launch_push_loop(port: int, db_url: str):
                 break
             except Exception:
                 time.sleep(2)
-        print(f"🚀 Remote push loop started → {remote_ui} (immediate + every 30s)")
+        print(f"🚀 Remote push loop started → {remote_ui} (immediate + every 10s)")
         while True:
             try:
                 from api.push_client import push_snapshot
                 push_snapshot(db_url, ui_url=remote_ui)
             except Exception as e:
                 print(f"⚠️  Remote push failed (non-fatal): {e}")
-            time.sleep(30)
+            time.sleep(10)
 
     threading.Thread(target=_loop, daemon=True).start()
 
