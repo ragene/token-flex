@@ -644,6 +644,7 @@ async def push_snapshot(body: PushSnapshotIn, request: Request) -> dict:
         log.debug("push_cache merge failed (non-fatal): %s", exc)
 
     # Persist merged payload to DB.
+    _db_error: str = ""
     try:
         database_url: str = request.app.state.database_url
         conn = _conn(request)
@@ -658,6 +659,7 @@ async def push_snapshot(body: PushSnapshotIn, request: Request) -> dict:
         finally:
             conn.close()
     except Exception as exc:
+        _db_error = str(exc)
         log.warning("push_cache persist FAILED: %s", exc, exc_info=True)
 
     # Notify each client with their own user-scoped snapshot rather than
@@ -665,7 +667,10 @@ async def push_snapshot(body: PushSnapshotIn, request: Request) -> dict:
     # between users when multiple people are connected simultaneously.
     database_url: str = request.app.state.database_url
     await ws_manager.notify(lambda email: _build_snapshot(database_url, user_email=email), require_email=bool(AUTH0_DOMAIN))
-    return {"ok": True, "clients_notified": ws_manager.connection_count}
+    result: dict = {"ok": True, "clients_notified": ws_manager.connection_count}
+    if _db_error:
+        result["db_error"] = _db_error
+    return result
 
 
 # ── Record endpoint ───────────────────────────────────────────────────────────
