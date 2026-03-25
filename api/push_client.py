@@ -113,7 +113,43 @@ def _build_session_data() -> dict:
 
 
 def _build_token_data() -> dict:
-    """Build token count / status data from local session + memory files."""
+    """
+    Build token count / status data — single source of truth.
+
+    Strategy (in priority order):
+      1. Fetch from local /tokens API (same logic as the dashboard's GET /tokens).
+         This is the authoritative value since it reads actual .jsonl file sizes.
+      2. Fall back to file-based estimation if the local API is unreachable.
+    """
+    import urllib.request as _ur
+
+    port = int(os.environ.get("TOKEN_FLOW_PORT", "8001"))
+    try:
+        req = _ur.Request(f"http://localhost:{port}/tokens")
+        tok = _get_push_token()
+        if tok:
+            req.add_header("Authorization", f"Bearer {tok}")
+        with _ur.urlopen(req, timeout=3) as r:
+            data = json.loads(r.read())
+            # Normalise field names so downstream consumers see a consistent shape.
+            return {
+                "total_tokens_approx":   data.get("total_tokens_approx", 0),
+                "session_tokens":        data.get("session_tokens", 0),
+                "active_session_tokens": data.get("claude_tokens", 0),
+                "idle_session_tokens":   data.get("session_tokens", 0) - data.get("claude_tokens", 0),
+                "memory_tokens":         data.get("memory_tokens", 0),
+                "session_files":         data.get("session_files", 0),
+                "status":                data.get("status", "ok"),
+                "message":               data.get("message", ""),
+                "warn_threshold":        data.get("warn_threshold", 30000),
+                "distill_threshold":     data.get("distill_threshold", 30000),
+                "cached_chunks":         data.get("cached_chunks", 0),
+                "cached_chunk_tokens":   data.get("cached_chunk_tokens", 0),
+            }
+    except Exception:
+        pass  # fall through to file-based fallback
+
+    # ── File-based fallback (local API unreachable) ───────────────────────────
     from pathlib import Path
 
     sessions_dir = Path(
@@ -124,8 +160,8 @@ def _build_token_data() -> dict:
         "MEMORY_DIR",
         os.path.expanduser("~/.openclaw/workspace/memory"),
     ))
-    warn      = int(os.environ.get("SMART_MEMORY_WARN_TOKENS",   "30000"))
-    distill   = int(os.environ.get("SMART_MEMORY_DISTILL_TOKENS", "30000"))
+    warn    = int(os.environ.get("SMART_MEMORY_WARN_TOKENS",    "30000"))
+    distill = int(os.environ.get("SMART_MEMORY_DISTILL_TOKENS", "30000"))
 
     def _approx(p: Path) -> int:
         try:
@@ -133,57 +169,27 @@ def _build_token_data() -> dict:
         except Exception:
             return 0
 
-    session_files = list(sessions_dir.glob("*.jsonl")) if sessions_dir.exists() else []
+    session_files  = list(sessions_dir.glob("*.jsonl")) if sessions_dir.exists() else []
+    session_tokens = sum(_approx(f) for f in session_files)
 
-    # Use totalTokens from sessions.json metadata — accurate count tracked by OpenClaw.
-    # Fall back to chars//4 heuristic only when metadata is absent.
-    _active_sid    = None
-    _active_tokens = 0
-    _idle_tokens   = 0
-    try:
-        import json as _j
-        _sj = sessions_dir / "sessions.json"
-        if _sj.exists():
-            _meta = _j.loads(_sj.read_text(errors="ignore"))
-            for _key, _sm in _meta.items():
-                _sid = _sm.get("sessionId")
-                _tok = _sm.get("totalTokens") or 0
-                if not _tok:
-                    # fallback: estimate from file size
-                    _sf = sessions_dir / f"{_sid}.jsonl" if _sid else None
-                    _tok = _approx(_sf) if _sf else 0
-                # Active session = the main agent session
-                if _key == "agent:main:main":
-                    _active_sid    = _sid
-                    _active_tokens = _tok
-                else:
-                    _idle_tokens += _tok
-    except Exception:
-        # Full fallback — sum all session files by chars//4
-        for f in session_files:
-            _idle_tokens += _approx(f)
+    # Sum all memory files (not just today's)
+    memory_tokens = sum(_approx(f) for f in memory_dir.glob("*.md")) if memory_dir.exists() else 0
 
-    session_tokens = _active_tokens + _idle_tokens
+    total     = session_tokens + memory_tokens
+    clearable = memory_tokens  # active session isn't clearable without distill
 
-    today = datetime.utcnow().date().isoformat()
-    memory_tokens = _approx(memory_dir / f"{today}.md")
-    total = session_tokens + memory_tokens
-
-    # Status is based on idle (clearable) sessions + memory only.
-    # The active session grows continuously and shouldn't trigger a distill alarm by itself.
-    clearable = _idle_tokens + memory_tokens
     if clearable >= distill:
         status, msg = "critical", f"⚠️ Clearable context large (~{clearable:,} tokens). Distill NOW."
     elif clearable >= warn:
-        status, msg = "warning", f"🟡 Clearable context growing (~{clearable:,} tokens). Consider distilling."
+        status, msg = "warning",  f"🟡 Clearable context growing (~{clearable:,} tokens). Consider distilling."
     else:
-        status, msg = "ok", f"✅ Context healthy (~{clearable:,} clearable tokens). Active session: ~{_active_tokens:,} tokens."
+        status, msg = "ok",       f"✅ Context healthy (~{clearable:,} clearable tokens). Session: ~{session_tokens:,} tokens."
 
     return {
         "total_tokens_approx":   total,
         "session_tokens":        session_tokens,
-        "active_session_tokens": _active_tokens,
-        "idle_session_tokens":   _idle_tokens,
+        "active_session_tokens": session_tokens,
+        "idle_session_tokens":   0,
         "memory_tokens":         memory_tokens,
         "session_files":         len(session_files),
         "status":                status,
