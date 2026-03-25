@@ -131,14 +131,23 @@ def _build_token_data() -> dict:
             req.add_header("Authorization", f"Bearer {tok}")
         with _ur.urlopen(req, timeout=3) as r:
             data = json.loads(r.read())
-            # Normalise field names so downstream consumers see a consistent shape.
+            # Normalise field names so dashboard consumers see a consistent shape.
+            # /tokens returns:
+            #   session_tokens  = OpenClaw sessions (the main context to watch)
+            #   claude_tokens   = Claude CLI sessions (usually 0)
+            # Dashboard expects:
+            #   active_session_tokens = the big one to display
+            #   idle_session_tokens   = other idle sessions
+            session_tokens = data.get("session_tokens", 0)
+            claude_tokens  = data.get("claude_tokens", 0)
             return {
                 "total_tokens_approx":   data.get("total_tokens_approx", 0),
-                "session_tokens":        data.get("session_tokens", 0),
-                "active_session_tokens": data.get("claude_tokens", 0),
-                "idle_session_tokens":   data.get("session_tokens", 0) - data.get("claude_tokens", 0),
+                "session_tokens":        session_tokens,
+                "active_session_tokens": session_tokens,   # maps to dashboard "Local Session"
+                "idle_session_tokens":   claude_tokens,    # Claude CLI sessions (usually 0)
                 "memory_tokens":         data.get("memory_tokens", 0),
                 "session_files":         data.get("session_files", 0),
+                "claude_session_files":  data.get("claude_session_files", 0),
                 "status":                data.get("status", "ok"),
                 "message":               data.get("message", ""),
                 "warn_threshold":        data.get("warn_threshold", 30000),
@@ -313,7 +322,15 @@ def _build_snapshot(db_path: str) -> dict:
         grand_calls  = sum(r["total_calls"]  for r in summary_rows)
         grand_cost   = round(sum(r["cost_usd"] for r in summary_rows), 6)
 
-        # Latest 100 chunks
+        # Chunk cache — send totals + latest 100 rows for display.
+        # Totals are sent separately so the dashboard can show accurate counts
+        # even though we only ship 100 rows in the payload.
+        chunk_totals = c.execute(
+            "SELECT COUNT(*), COALESCE(SUM(token_count),0) FROM chunk_cache"
+        ).fetchone()
+        chunk_total_count  = int(chunk_totals[0] or 0)
+        chunk_total_tokens = int(chunk_totals[1] or 0)
+
         chunk_rows = c.execute("""
             SELECT id, source_label, chunk_index, token_count,
                    composite_score, fact_score, preference_score, intent_score,
@@ -404,21 +421,29 @@ def _build_snapshot(db_path: str) -> dict:
     finally:
         c.close()
 
+    token_data = _build_token_data()
+    # Always stamp the real chunk totals into the tokens dict so the dashboard
+    # uses accurate counts (not len(chunks) which is capped at 100).
+    token_data["cached_chunks"]       = chunk_total_count
+    token_data["cached_chunk_tokens"] = chunk_total_tokens
+
     return {
         "ts": datetime.utcnow().isoformat() + "Z",
-        "owner_email": _get_owner_email(),   # tags snapshot with local user identity
+        "owner_email": _get_owner_email(),
         "summary": {
             "rows": summary_rows,
             "grand_total_tokens": grand_tokens,
             "grand_total_calls":  grand_calls,
             "grand_cost_usd":     grand_cost,
         },
-        "chunks":          chunks,
+        "chunks":             chunks,
+        "chunk_total_count":  chunk_total_count,   # real total (not capped at 100)
+        "chunk_total_tokens": chunk_total_tokens,
         "events":          events,
         "memory_entries":  memory_entries,
         "pipeline_events": pipeline_events,
         "session":         _build_session_data(),
-        "tokens":          _build_token_data(),
+        "tokens":          token_data,
     }
 
 

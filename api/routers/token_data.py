@@ -441,10 +441,16 @@ def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict
     else:
         tokens, session = _build_tokens_and_session(database_url, user_email=user_email)
 
-    # Attach live chunk cache count to tokens dict (always from DB — most current)
+    # Attach chunk cache totals to tokens dict.
+    # Prefer the explicit totals pushed by the local service (accurate even when
+    # the snapshot only ships 100 rows). Fall back to summing the rows we have.
     if tokens:
-        tokens["cached_chunks"]       = len(chunks)
-        tokens["cached_chunk_tokens"] = sum(c.get("token_count") or 0 for c in chunks)
+        if pushed and pushed.get("chunk_total_count") is not None:
+            tokens["cached_chunks"]       = pushed["chunk_total_count"]
+            tokens["cached_chunk_tokens"] = pushed.get("chunk_total_tokens", 0)
+        else:
+            tokens["cached_chunks"]       = len(chunks)
+            tokens["cached_chunk_tokens"] = sum(c.get("token_count") or 0 for c in chunks)
 
     return {
         "ts": datetime.utcnow().isoformat() + "Z",
