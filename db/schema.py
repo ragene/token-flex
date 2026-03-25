@@ -102,6 +102,25 @@ _SCHEMA_SQL = """
         updated_at TIMESTAMPTZ DEFAULT NOW()
     );
 
+    -- Live token stats — upserted by the local push client on every push.
+    -- Single row per owner_email. Dashboard reads this directly; no push_cache needed.
+    CREATE TABLE IF NOT EXISTS token_stats (
+        owner_email           TEXT PRIMARY KEY,
+        total_tokens_approx   INTEGER NOT NULL DEFAULT 0,
+        session_tokens        INTEGER NOT NULL DEFAULT 0,
+        active_session_tokens INTEGER NOT NULL DEFAULT 0,
+        idle_session_tokens   INTEGER NOT NULL DEFAULT 0,
+        memory_tokens         INTEGER NOT NULL DEFAULT 0,
+        session_files         INTEGER NOT NULL DEFAULT 0,
+        cached_chunks         INTEGER NOT NULL DEFAULT 0,
+        cached_chunk_tokens   INTEGER NOT NULL DEFAULT 0,
+        status                TEXT NOT NULL DEFAULT 'ok',
+        message               TEXT NOT NULL DEFAULT '',
+        warn_threshold        INTEGER NOT NULL DEFAULT 30000,
+        distill_threshold     INTEGER NOT NULL DEFAULT 30000,
+        updated_at            TIMESTAMPTZ DEFAULT NOW()
+    );
+
     -- SSO users with RBAC (roles: admin, viewer)
     CREATE TABLE IF NOT EXISTS tf_users (
         id          SERIAL PRIMARY KEY,
@@ -211,6 +230,23 @@ _SCHEMA_SQL_SQLITE = """
         id         INTEGER PRIMARY KEY,
         payload    TEXT NOT NULL,
         updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS token_stats (
+        owner_email           TEXT PRIMARY KEY,
+        total_tokens_approx   INTEGER NOT NULL DEFAULT 0,
+        session_tokens        INTEGER NOT NULL DEFAULT 0,
+        active_session_tokens INTEGER NOT NULL DEFAULT 0,
+        idle_session_tokens   INTEGER NOT NULL DEFAULT 0,
+        memory_tokens         INTEGER NOT NULL DEFAULT 0,
+        session_files         INTEGER NOT NULL DEFAULT 0,
+        cached_chunks         INTEGER NOT NULL DEFAULT 0,
+        cached_chunk_tokens   INTEGER NOT NULL DEFAULT 0,
+        status                TEXT NOT NULL DEFAULT 'ok',
+        message               TEXT NOT NULL DEFAULT '',
+        warn_threshold        INTEGER NOT NULL DEFAULT 30000,
+        distill_threshold     INTEGER NOT NULL DEFAULT 30000,
+        updated_at            TEXT DEFAULT (datetime('now'))
     );
 
     CREATE TABLE IF NOT EXISTS tf_users (

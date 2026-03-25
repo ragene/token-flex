@@ -355,26 +355,56 @@ def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict
     finally:
         c.close()
 
-    # Pull tokens/session/memory/pipeline from push_cache first (has real local data).
-    # Fall back to building from local files (works when running the service locally).
-    # Initialise tokens/session to safe defaults before the if/else so they are always
-    # defined even if push_cache is empty and _build_tokens_and_session isn't called.
+    # ── Token stats: DB-first, push_cache fallback, file-based last resort ──────
+    # Priority:
+    #   1. token_stats table (written atomically by push client — always accurate)
+    #   2. push_cache (legacy — has chunks/events/session data)
+    #   3. _build_tokens_and_session (local file reads — ECS has no session files)
     tokens: dict = {}
     session: dict = {"session_id": None, "token_count_approx": 0, "message_count": 0}
+
+    # Try token_stats first
+    _ts_row = None
+    try:
+        _ts_conn = pg_connect(database_url)
+        try:
+            _ts_row = _ts_conn.execute(
+                "SELECT * FROM token_stats ORDER BY updated_at DESC LIMIT 1"
+            ).fetchone()
+        finally:
+            _ts_conn.close()
+    except Exception as _ts_err:
+        log.debug("token_stats read failed: %s", _ts_err)
+
     pushed = _load_push_cache(database_url)
-    if pushed:
+
+    if _ts_row:
+        r = dict(_ts_row)
+        _owner_email = (r.get("owner_email") or "").strip()
+        _is_owner = (not user_email) or (not _owner_email) or (user_email == _owner_email)
+        tokens = {
+            "total_tokens_approx":   r.get("total_tokens_approx", 0),
+            "session_tokens":        r.get("session_tokens", 0),
+            "active_session_tokens": r.get("active_session_tokens", 0),
+            "idle_session_tokens":   r.get("idle_session_tokens", 0),
+            "memory_tokens":         r.get("memory_tokens", 0),
+            "session_files":         r.get("session_files", 0),
+            "cached_chunks":         r.get("cached_chunks", 0),
+            "cached_chunk_tokens":   r.get("cached_chunk_tokens", 0),
+            "status":                r.get("status", "ok"),
+            "message":               r.get("message", ""),
+            "warn_threshold":        r.get("warn_threshold", 30000),
+            "distill_threshold":     r.get("distill_threshold", 30000),
+        } if _is_owner else None
+        # session from push_cache (token_stats doesn't store session metadata)
+        if pushed and _is_owner:
+            session = pushed.get("session") or session
+    elif pushed:
         # Determine if the requesting user is the machine owner.
         _owner_email = (pushed.get("owner_email") or "").strip()
-        # If owner_email is not set in push_cache (local service didn't resolve it),
-        # treat any authenticated user as the owner — single-user assumption.
-        # This prevents the dashboard going blank when owner_email isn't configured.
         _is_owner = (not user_email) or (not _owner_email) or (user_email == _owner_email)
-
-        # tokens/session = local machine data — show to owner only.
-        # Remote viewers get None so the UI hides the section.
         tokens  = (pushed.get("tokens")  or {}) if _is_owner else None
-        session = (pushed.get("session") or {"session_id": None, "token_count_approx": 0, "message_count": 0}) if _is_owner \
-                  else {"session_id": None, "token_count_approx": 0, "message_count": 0}
+        session = (pushed.get("session") or session) if _is_owner else session
         # token_usage lives in local SQLite (not Postgres), so DB queries above
         # return empty when using a remote Postgres deployment.  Fall back to
         # push_cache data, but filter it to the requesting user when user_email
@@ -438,19 +468,23 @@ def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict
         # Use push_cache chunks as the source of truth when the DB has none.
         if not chunks and pushed.get("chunks"):
             chunks = pushed["chunks"]
-    else:
+    elif not _ts_row and not pushed:
+        # Last resort: read from local files (only useful when running locally,
+        # never on ECS which has no session files).
         tokens, session = _build_tokens_and_session(database_url, user_email=user_email)
 
     # Attach chunk cache totals to tokens dict.
-    # Prefer the explicit totals pushed by the local service (accurate even when
-    # the snapshot only ships 100 rows). Fall back to summing the rows we have.
+    # Priority: token_stats (already in tokens dict from DB) → push_cache totals → computed
     if tokens:
-        if pushed and pushed.get("chunk_total_count") is not None:
-            tokens["cached_chunks"]       = pushed["chunk_total_count"]
-            tokens["cached_chunk_tokens"] = pushed.get("chunk_total_tokens", 0)
-        else:
-            tokens["cached_chunks"]       = len(chunks)
-            tokens["cached_chunk_tokens"] = sum(c.get("token_count") or 0 for c in chunks)
+        # token_stats already has cached_chunks/cached_chunk_tokens from upsert — keep them.
+        # Only override if they're zero and we have better data.
+        if not tokens.get("cached_chunks"):
+            if pushed and pushed.get("chunk_total_count"):
+                tokens["cached_chunks"]       = pushed["chunk_total_count"]
+                tokens["cached_chunk_tokens"] = pushed.get("chunk_total_tokens", 0)
+            elif chunks:
+                tokens["cached_chunks"]       = len(chunks)
+                tokens["cached_chunk_tokens"] = sum(c.get("token_count") or 0 for c in chunks)
 
     return {
         "ts": datetime.utcnow().isoformat() + "Z",
@@ -618,56 +652,100 @@ async def token_data_ws(websocket: WebSocket, token: Optional[str] = None) -> No
 @router.post("/token-data/push", status_code=200, dependencies=[Depends(verify_token)])
 async def push_snapshot(body: PushSnapshotIn, request: Request) -> dict:
     """
-    Receive a snapshot from the local token-flow client, persist it to
-    push_cache (survives restarts), and broadcast to all connected WS clients.
+    Receive token stats from the local push client.
+
+    Flow:
+      1. Atomically upsert token_stats row in DB (owner_email is the key).
+      2. Also upsert push_cache for backwards compat (chunks/events/etc).
+      3. Broadcast fresh DB-backed snapshot to all connected WS clients.
+
+    Dashboard WS reads exclusively from token_stats — no push_cache dependency.
     """
-    payload = body.model_dump(exclude_none=False)
-    if not payload.get("ts"):
-        payload["ts"] = datetime.utcnow().isoformat() + "Z"
+    payload   = body.model_dump(exclude_none=False)
+    tokens    = payload.get("tokens") or {}
+    owner     = (payload.get("owner_email") or "").strip() or "default"
+    database_url: str = request.app.state.database_url
 
-    # Merge with existing push_cache: keep chunks/events/summary from the
-    # previous snapshot when the new payload omits them (e.g. lightweight
-    # RemotePusher only sends tokens — we don't want to wipe chunk data).
-    try:
-        database_url: str = request.app.state.database_url
-        existing = _load_push_cache(database_url) or {}
-        for field in ("chunks", "chunk_total_count", "chunk_total_tokens",
-                      "events", "summary", "memory_entries", "pipeline_events"):
-            incoming = payload.get(field)
-            if not incoming and existing.get(field):
-                payload[field] = existing[field]
-        # Always use the freshest tokens dict (from incoming push)
-        # but keep owner_email if the incoming push didn't set it.
-        if not payload.get("owner_email") and existing.get("owner_email"):
-            payload["owner_email"] = existing["owner_email"]
-    except Exception as exc:
-        log.debug("push_cache merge failed (non-fatal): %s", exc)
-
-    # Persist merged payload to DB.
+    # ── 1. Upsert token_stats (atomic, DB source of truth) ───────────────────
     _db_error: str = ""
     try:
-        database_url: str = request.app.state.database_url
         conn = _conn(request)
         try:
-            payload_json = _json.dumps(payload)
             conn.execute(
-                """INSERT INTO push_cache (id, payload, updated_at) VALUES (1, ?, NOW())
-                   ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()""",
-                (payload_json,),
+                """INSERT INTO token_stats (
+                       owner_email, total_tokens_approx, session_tokens,
+                       active_session_tokens, idle_session_tokens, memory_tokens,
+                       session_files, cached_chunks, cached_chunk_tokens,
+                       status, message, warn_threshold, distill_threshold, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+                   ON CONFLICT (owner_email) DO UPDATE SET
+                       total_tokens_approx   = EXCLUDED.total_tokens_approx,
+                       session_tokens        = EXCLUDED.session_tokens,
+                       active_session_tokens = EXCLUDED.active_session_tokens,
+                       idle_session_tokens   = EXCLUDED.idle_session_tokens,
+                       memory_tokens         = EXCLUDED.memory_tokens,
+                       session_files         = EXCLUDED.session_files,
+                       cached_chunks         = EXCLUDED.cached_chunks,
+                       cached_chunk_tokens   = EXCLUDED.cached_chunk_tokens,
+                       status                = EXCLUDED.status,
+                       message               = EXCLUDED.message,
+                       warn_threshold        = EXCLUDED.warn_threshold,
+                       distill_threshold     = EXCLUDED.distill_threshold,
+                       updated_at            = NOW()""",
+                (
+                    owner,
+                    tokens.get("total_tokens_approx", 0),
+                    tokens.get("session_tokens", 0),
+                    tokens.get("active_session_tokens", 0),
+                    tokens.get("idle_session_tokens", 0),
+                    tokens.get("memory_tokens", 0),
+                    tokens.get("session_files", 0),
+                    payload.get("chunk_total_count") or tokens.get("cached_chunks", 0),
+                    payload.get("chunk_total_tokens") or tokens.get("cached_chunk_tokens", 0),
+                    tokens.get("status", "ok"),
+                    tokens.get("message", ""),
+                    tokens.get("warn_threshold", 30000),
+                    tokens.get("distill_threshold", 30000),
+                ),
             )
             conn.commit()
         finally:
             conn.close()
     except Exception as exc:
         _db_error = str(exc)
-        log.warning("push_cache persist FAILED: %s", exc, exc_info=True)
+        log.warning("token_stats upsert FAILED: %s", exc, exc_info=True)
 
-    # Notify each client with their own user-scoped snapshot rather than
-    # broadcasting the shared push payload — prevents data cross-contamination
-    # between users when multiple people are connected simultaneously.
-    database_url: str = request.app.state.database_url
-    await ws_manager.notify(lambda email: _build_snapshot(database_url, user_email=email), require_email=bool(AUTH0_DOMAIN))
-    result: dict = {"ok": True, "clients_notified": ws_manager.connection_count}
+    # ── 2. Also update push_cache (for chunks/events/session backwards compat) ─
+    try:
+        existing = _load_push_cache(database_url) or {}
+        for field in ("chunks", "chunk_total_count", "chunk_total_tokens",
+                      "events", "summary", "memory_entries", "pipeline_events", "session"):
+            if not payload.get(field) and existing.get(field):
+                payload[field] = existing[field]
+        if not payload.get("owner_email") and existing.get("owner_email"):
+            payload["owner_email"] = existing["owner_email"]
+        if not payload.get("ts"):
+            payload["ts"] = datetime.utcnow().isoformat() + "Z"
+
+        conn2 = _conn(request)
+        try:
+            conn2.execute(
+                """INSERT INTO push_cache (id, payload, updated_at) VALUES (1, ?, NOW())
+                   ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()""",
+                (_json.dumps(payload),),
+            )
+            conn2.commit()
+        finally:
+            conn2.close()
+    except Exception as exc:
+        log.debug("push_cache update failed (non-fatal): %s", exc)
+
+    # ── 3. Broadcast to WS clients — snapshot reads from token_stats ──────────
+    await ws_manager.notify(
+        lambda email: _build_snapshot(database_url, user_email=email),
+        require_email=bool(AUTH0_DOMAIN),
+    )
+    result: dict = {"ok": not bool(_db_error), "clients_notified": ws_manager.connection_count}
     if _db_error:
         result["db_error"] = _db_error
     return result
