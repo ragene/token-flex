@@ -671,6 +671,11 @@ async def push_snapshot(body: PushSnapshotIn, request: Request) -> dict:
     try:
         conn = _conn(request)
         try:
+            # Roll back any aborted transaction from a previous error before upsert.
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
             conn.execute(
                 """INSERT INTO token_stats (
                        owner_email, total_tokens_approx, session_tokens,
