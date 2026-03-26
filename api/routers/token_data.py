@@ -363,14 +363,21 @@ def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict
     tokens: dict = {}
     session: dict = {"session_id": None, "token_count_approx": 0, "message_count": 0}
 
-    # Try token_stats first
+    # Try token_stats first — filter by user_email so each user sees their own machine data
     _ts_row = None
     try:
         _ts_conn = pg_connect(database_url)
         try:
-            _ts_row = _ts_conn.execute(
-                "SELECT * FROM token_stats ORDER BY updated_at DESC LIMIT 1"
-            ).fetchone()
+            if user_email:
+                _ts_row = _ts_conn.execute(
+                    "SELECT * FROM token_stats WHERE owner_email = %s LIMIT 1",
+                    (user_email,)
+                ).fetchone()
+            else:
+                # Unauthenticated / admin: fall back to most recent row
+                _ts_row = _ts_conn.execute(
+                    "SELECT * FROM token_stats ORDER BY updated_at DESC LIMIT 1"
+                ).fetchone()
         finally:
             _ts_conn.close()
     except Exception as _ts_err:
@@ -380,10 +387,9 @@ def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict
 
     if _ts_row:
         r = dict(_ts_row)
+        # token_stats is already filtered by user_email above — this row belongs to them.
         _owner_email = (r.get("owner_email") or "").strip()
-        _is_owner = (not user_email) or (not _owner_email) or (user_email == _owner_email)
-        # All authenticated users can view machine token meters (read-only).
-        # _is_owner is preserved for write/destructive actions only.
+        _is_owner = True  # row was fetched by user_email match (or admin fallback)
         tokens = {
             "total_tokens_approx":   r.get("total_tokens_approx", 0),
             "session_tokens":        r.get("session_tokens", 0),
@@ -398,16 +404,14 @@ def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict
             "warn_threshold":        r.get("warn_threshold", 30000),
             "distill_threshold":     r.get("distill_threshold", 30000),
         }
-        # session from push_cache (all users can see machine session metadata)
-        if pushed:
+        if pushed and (not user_email or pushed.get("owner_email") == user_email):
             session = pushed.get("session") or session
     elif pushed:
-        # All authenticated users can view machine token data.
-        # _is_owner is preserved for write/destructive actions only.
+        # push_cache fallback — scope to requesting user via owner_email match
         _owner_email = (pushed.get("owner_email") or "").strip()
         _is_owner = (not user_email) or (not _owner_email) or (user_email == _owner_email)
-        tokens  = pushed.get("tokens")  or {}
-        session = pushed.get("session") or session
+        tokens  = (pushed.get("tokens") or {}) if _is_owner else None
+        session = (pushed.get("session") or session) if _is_owner else session
         # token_usage lives in local SQLite (not Postgres), so DB queries above
         # return empty when using a remote Postgres deployment.  Fall back to
         # push_cache data, but filter it to the requesting user when user_email
