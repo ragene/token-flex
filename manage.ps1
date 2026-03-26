@@ -1,4 +1,4 @@
-﻿# token-flow service manager - Windows (PowerShell)
+# token-flow service manager - Windows (PowerShell)
 # Usage: .\manage.ps1 [start|stop|restart|status|install-deps|install-service|uninstall-service|start-poller|stop-poller|status-poller]
 #
 # Windows Service support (recommended):
