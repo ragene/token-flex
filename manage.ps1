@@ -142,7 +142,12 @@ for p in [sys.argv[1]]:
 
 function Resolve-TfJwt {
     $authPath = $DEFAULT_TF_AUTH.Replace('\','/')
-    $pyCode = 'import json, pathlib, time; p = pathlib.Path(r"' + $authPath + '"); d = json.loads(p.read_text()); print(d["token"]) if time.time() < d.get("expires_at", 0) - 60 else None'
+    $pyCode = @"
+import json, pathlib, time
+p = pathlib.Path(r'$authPath')
+d = json.loads(p.read_text())
+print(d['token']) if time.time() < d.get('expires_at', 0) - 60 else None
+"@
     $jwt = python -c $pyCode 2>$null
     return $jwt
 }
@@ -151,7 +156,13 @@ function Resolve-OwnerEmail {
     # Allow explicit override via env var (e.g. set in ECS task def or CI)
     if ($env:OWNER_EMAIL) { return $env:OWNER_EMAIL }
     $authPath = $DEFAULT_TF_AUTH.Replace('\','/')
-    $pyCode = 'import json, pathlib, time; p = pathlib.Path(r"' + $authPath + '"); d = json.loads(p.read_text()); e = (d.get(\"user\") or {}).get(\"email\",\"\").strip(); print(e) if e and time.time() < d.get(\"expires_at\",0)-60 else None'
+    $pyCode = @"
+import json, pathlib, time
+p = pathlib.Path(r'$authPath')
+d = json.loads(p.read_text())
+e = (d.get('user') or {}).get('email','').strip()
+print(e) if e and time.time() < d.get('expires_at',0)-60 else None
+"@
     $email = python -c $pyCode 2>$null
     return $email
 }
