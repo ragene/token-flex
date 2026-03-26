@@ -110,8 +110,12 @@ def _try_open_browser(url: str) -> bool:
             return False
 
     # ── WSL: delegate to Windows browser ─────────────────────────────────────
+    try:
+        _uname_release = _os.uname().release.lower()
+    except AttributeError:
+        _uname_release = ""
     wsl_interop = _os.path.exists("/proc/sys/fs/binfmt_misc/WSLInterop") or \
-                  "microsoft" in _os.uname().release.lower()
+                  "microsoft" in _uname_release
     if wsl_interop:
         try:
             _sp.Popen(
