@@ -89,6 +89,15 @@ def _try_open_browser(url: str) -> bool:
     import subprocess as _sp
     import sys as _sys
 
+    # ── Windows ───────────────────────────────────────────────────────────────
+    if _sys.platform == "win32":
+        try:
+            import webbrowser
+            webbrowser.open(url)
+            return True
+        except Exception:
+            return False
+
     # ── macOS ─────────────────────────────────────────────────────────────────
     if _sys.platform == "darwin":
         try:

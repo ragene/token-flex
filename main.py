@@ -9,13 +9,13 @@ from db.schema import init_db
 load_dotenv()
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
-WORKSPACE    = Path(os.environ.get("WORKSPACE",   "/home/ec2-user/.openclaw/workspace"))
-MEMORY_DIR   = Path(os.environ.get("MEMORY_DIR",  "/home/ec2-user/.openclaw/workspace/memory"))
+WORKSPACE    = Path(os.environ.get("WORKSPACE",   str(Path.home() / ".openclaw" / "workspace")))
+MEMORY_DIR   = Path(os.environ.get("MEMORY_DIR",  str(Path.home() / ".openclaw" / "workspace" / "memory")))
 PORT         = int(os.environ.get("PORT", 8001))
 
 # Fall back to SQLite for local dev when DATABASE_URL is not set
 if not DATABASE_URL:
-    _sqlite_path = Path(os.environ.get("TOKEN_FLOW_DB", "/home/ec2-user/.openclaw/data/token_flow.db"))
+    _sqlite_path = Path(os.environ.get("TOKEN_FLOW_DB", str(Path.home() / ".openclaw" / "data" / "token_flow.db")))
     _sqlite_path.parent.mkdir(parents=True, exist_ok=True)
     DATABASE_URL = f"sqlite:///{_sqlite_path}"
 

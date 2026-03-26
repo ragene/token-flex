@@ -36,6 +36,7 @@ Environment variables honoured
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import socket
@@ -45,8 +46,25 @@ import time
 import urllib.request
 from pathlib import Path
 
-PID_FILE = Path("/tmp/token-flow.pid")
-LOG_FILE = Path("/tmp/token-flow.log")
+# Fix Windows console encoding for emoji/unicode output
+if sys.platform == "win32" and not os.environ.get("PYTHONIOENCODING"):
+    os.environ["PYTHONIOENCODING"] = "utf-8"
+    # Re-wrap stdout/stderr if they exist and use a lossy codec
+    for _stream_name in ("stdout", "stderr"):
+        _s = getattr(sys, _stream_name, None)
+        if _s and hasattr(_s, "buffer") and hasattr(_s, "encoding") and _s.encoding and _s.encoding.lower().replace("-", "") != "utf8":
+            try:
+                setattr(sys, _stream_name, io.TextIOWrapper(_s.detach(), encoding="utf-8", errors="replace", line_buffering=True))
+            except Exception:
+                pass
+
+# Platform-appropriate temp paths
+if sys.platform == "win32":
+    _tmp = Path(os.environ.get("TEMP", os.environ.get("TMP", "C:\\Temp")))
+else:
+    _tmp = Path("/tmp")
+PID_FILE = _tmp / "token-flow.pid"
+LOG_FILE = _tmp / "token-flow.log"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -56,8 +74,17 @@ def _is_running() -> bool:
         return False
     try:
         pid = int(PID_FILE.read_text().strip())
-        os.kill(pid, 0)
-        return True
+        if sys.platform == "win32":
+            # os.kill(pid, 0) on Windows kills the process; use tasklist instead
+            import subprocess as _sp
+            result = _sp.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                capture_output=True, text=True,
+            )
+            return str(pid) in result.stdout
+        else:
+            os.kill(pid, 0)
+            return True
     except (OSError, ValueError):
         return False
 
@@ -291,7 +318,11 @@ def cmd_stop(_args: argparse.Namespace) -> int:
         print("ℹ️  token-flow not running.")
         return 0
     pid = int(PID_FILE.read_text().strip())
-    os.kill(pid, 15)   # SIGTERM
+    if sys.platform == "win32":
+        import subprocess as _sp
+        _sp.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
+    else:
+        os.kill(pid, 15)   # SIGTERM
     PID_FILE.unlink(missing_ok=True)
     print("✅ token-flow stopped.")
     return 0
@@ -471,7 +502,7 @@ def main() -> None:
         Path.cwd() / ".env",
         Path(__file__).parent.parent / ".env",
         # Repo .env: resolved via TOKEN_FLOW_REPO or a well-known default
-        Path(os.environ.get("TOKEN_FLOW_REPO", "/home/ec2-user/.openclaw/workspace/token-flow")) / ".env",
+        Path(os.environ.get("TOKEN_FLOW_REPO", str(Path.home() / ".openclaw" / "workspace" / "token-flow"))) / ".env",
     ]:
         if candidate and candidate.exists():
             load_dotenv(candidate)
