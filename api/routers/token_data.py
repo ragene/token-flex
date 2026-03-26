@@ -382,6 +382,8 @@ def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict
         r = dict(_ts_row)
         _owner_email = (r.get("owner_email") or "").strip()
         _is_owner = (not user_email) or (not _owner_email) or (user_email == _owner_email)
+        # All authenticated users can view machine token meters (read-only).
+        # _is_owner is preserved for write/destructive actions only.
         tokens = {
             "total_tokens_approx":   r.get("total_tokens_approx", 0),
             "session_tokens":        r.get("session_tokens", 0),
@@ -395,16 +397,17 @@ def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict
             "message":               r.get("message", ""),
             "warn_threshold":        r.get("warn_threshold", 30000),
             "distill_threshold":     r.get("distill_threshold", 30000),
-        } if _is_owner else None
-        # session from push_cache (token_stats doesn't store session metadata)
-        if pushed and _is_owner:
+        }
+        # session from push_cache (all users can see machine session metadata)
+        if pushed:
             session = pushed.get("session") or session
     elif pushed:
-        # Determine if the requesting user is the machine owner.
+        # All authenticated users can view machine token data.
+        # _is_owner is preserved for write/destructive actions only.
         _owner_email = (pushed.get("owner_email") or "").strip()
         _is_owner = (not user_email) or (not _owner_email) or (user_email == _owner_email)
-        tokens  = (pushed.get("tokens")  or {}) if _is_owner else None
-        session = (pushed.get("session") or session) if _is_owner else session
+        tokens  = pushed.get("tokens")  or {}
+        session = pushed.get("session") or session
         # token_usage lives in local SQLite (not Postgres), so DB queries above
         # return empty when using a remote Postgres deployment.  Fall back to
         # push_cache data, but filter it to the requesting user when user_email
