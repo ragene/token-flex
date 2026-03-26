@@ -1,4 +1,4 @@
-# token-flow service manager — Windows (PowerShell)
+﻿# token-flow service manager - Windows (PowerShell)
 # Usage: .\manage.ps1 [start|stop|restart|status|install-deps|install-service|uninstall-service|start-poller|stop-poller|status-poller]
 #
 # Windows Service support (recommended):
@@ -14,7 +14,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# ── Config ────────────────────────────────────────────────────────────────────
+# -- Config --------------------------------------------------------------------
 $PORT        = if ($env:TOKEN_FLOW_PORT) { $env:TOKEN_FLOW_PORT } else { "8001" }
 $SCRIPT_DIR  = Split-Path -Parent $MyInvocation.MyCommand.Path
 $SERVER_SCRIPT = Join-Path $SCRIPT_DIR "main.py"
@@ -33,12 +33,12 @@ $DEFAULT_SESSIONS  = Join-Path $HOME_DIR ".openclaw\agents\main\sessions"
 $DEFAULT_AUTH_JSON = Join-Path $HOME_DIR ".openclaw\agents\main\agent\auth-profiles.json"
 $DEFAULT_TF_AUTH   = Join-Path $HOME_DIR ".openclaw\tf_auth.json"
 
-# ── Windows Service config ────────────────────────────────────────────────────
+# -- Windows Service config ----------------------------------------------------
 $WIN_SERVICE_NAME = "TokenFlow"
 $WIN_SERVICE_DISPLAY = "Token Flow API"
 $WIN_SERVICE_DESC = "Token Flow local API server for FreightDawg smart memory and token tracking"
 
-# ── Windows Service delegation ───────────────────────────────────────────────
+# -- Windows Service delegation -----------------------------------------------
 # When the Windows service is installed, start/stop/restart/status delegate to
 # sc.exe so the process is fully detached from any terminal/TUI session and
 # auto-restarts on failure (configured via NSSM at install time).
@@ -52,35 +52,35 @@ if (WinService-Installed -and $Command -in @("start","stop","restart","status"))
             Start-Service -Name $WIN_SERVICE_NAME
             Start-Sleep -Seconds 2
             $svc = Get-Service -Name $WIN_SERVICE_NAME
-            Write-Host "✅ token-flow service: $($svc.Status)"
+            Write-Host "[OK] token-flow service: $($svc.Status)"
             try { (Invoke-WebRequest "http://localhost:$PORT/health" -UseBasicParsing -TimeoutSec 5).Content | python -m json.tool 2>$null } catch {}
         }
         "stop" {
             Stop-Service -Name $WIN_SERVICE_NAME -Force
-            Write-Host "✅ token-flow stopped."
+            Write-Host "[OK] token-flow stopped."
         }
         "restart" {
             Restart-Service -Name $WIN_SERVICE_NAME -Force
             Start-Sleep -Seconds 2
             $svc = Get-Service -Name $WIN_SERVICE_NAME
-            Write-Host "✅ token-flow service: $($svc.Status)"
+            Write-Host "[OK] token-flow service: $($svc.Status)"
             try { (Invoke-WebRequest "http://localhost:$PORT/health" -UseBasicParsing -TimeoutSec 5).Content | python -m json.tool 2>$null } catch {}
         }
         "status" {
             $svc = Get-Service -Name $WIN_SERVICE_NAME
             if ($svc.Status -eq "Running") {
-                Write-Host "✅ token-flow running (Windows service: $WIN_SERVICE_NAME) on http://localhost:$PORT"
+                Write-Host "[OK] token-flow running (Windows service: $WIN_SERVICE_NAME) on http://localhost:$PORT"
                 try { (Invoke-WebRequest "http://localhost:$PORT/health" -UseBasicParsing -TimeoutSec 5).Content | python -m json.tool 2>$null } catch {}
             } else {
-                Write-Host "❌ token-flow service status: $($svc.Status)"
+                Write-Host "[ERR] token-flow service status: $($svc.Status)"
             }
         }
     }
     exit 0
 }
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# -- Helpers -------------------------------------------------------------------
 function Is-Running {
     if (-not (Test-Path $PID_FILE)) { return $false }
     $storedPid = Get-Content $PID_FILE -ErrorAction SilentlyContinue
@@ -156,24 +156,24 @@ function Resolve-OwnerEmail {
     return $email
 }
 
-# ── Commands ──────────────────────────────────────────────────────────────────
+# -- Commands ------------------------------------------------------------------
 switch ($Command) {
 
     "install-deps" {
         pip install -q "fastapi>=0.111" "uvicorn[standard]>=0.29" "anthropic>=0.25" "boto3>=1.34" "tiktoken>=0.7" "python-dotenv>=1.0"
-        Write-Host "✅ Dependencies installed."
+        Write-Host "[OK] Dependencies installed."
     }
 
     "start" {
         if (Is-Running) {
-            Write-Host "⚠️  token-flow already running (PID $(Get-Content $PID_FILE))"
+            Write-Host "[WARN]  token-flow already running (PID $(Get-Content $PID_FILE))"
             exit 0
         }
 
         # Kill stale process on port
         $stalePid = Pid-On-Port
         if ($stalePid) {
-            Write-Host "⚠️  Port $PORT already in use by PID $stalePid — killing it..."
+            Write-Host "[WARN]  Port $PORT already in use by PID $stalePid - killing it..."
             Stop-Process -Id $stalePid -Force -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 1
             Write-Host "   Cleared."
@@ -278,9 +278,9 @@ switch ($Command) {
             $storedPid = Get-Content $PID_FILE
             Stop-Process -Id $storedPid -Force
             Remove-Item $PID_FILE -ErrorAction SilentlyContinue
-            Write-Host "✅ token-flow stopped."
+            Write-Host "[OK] token-flow stopped."
         } else {
-            Write-Host "ℹ️  token-flow not running."
+            Write-Host "[INFO]  token-flow not running."
         }
     }
 
@@ -292,19 +292,19 @@ switch ($Command) {
 
     "status" {
         if (Is-Running) {
-            Write-Host "✅ token-flow running (PID $(Get-Content $PID_FILE)) on http://localhost:$PORT"
+            Write-Host "[OK] token-flow running (PID $(Get-Content $PID_FILE)) on http://localhost:$PORT"
             try {
                 $r = Invoke-WebRequest "http://localhost:$PORT/health" -UseBasicParsing -ErrorAction Stop
                 $r.Content | python -m json.tool 2>$null
             } catch {}
         } else {
-            Write-Host "❌ token-flow not running."
+            Write-Host "[ERR] token-flow not running."
         }
     }
 
     "start-poller" {
         if ((Test-Path $POLLER_PID) -and (Get-Process -Id (Get-Content $POLLER_PID) -ErrorAction SilentlyContinue)) {
-            Write-Host "⚠️  SQS poller already running (PID $(Get-Content $POLLER_PID))"
+            Write-Host "[WARN]  SQS poller already running (PID $(Get-Content $POLLER_PID))"
             exit 0
         }
 
@@ -323,7 +323,7 @@ switch ($Command) {
         if ($jwt) {
             Write-Host "   Auth  : using cached token from $DEFAULT_TF_AUTH"
         } else {
-            Write-Host "   WARNING: No valid cached token — run the token-flow service first to authenticate"
+            Write-Host "   WARNING: No valid cached token - run the token-flow service first to authenticate"
         }
 
         $ownerEmail = Resolve-OwnerEmail
@@ -349,11 +349,11 @@ switch ($Command) {
         Start-Sleep -Seconds 1
 
         if (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue) {
-            Write-Host "✅ SQS poller started (PID $($proc.Id))"
+            Write-Host "[OK] SQS poller started (PID $($proc.Id))"
             Write-Host "   Queue : $queueUrl"
             Write-Host "   Logs  : $POLLER_LOG"
         } else {
-            Write-Host "❌ SQS poller failed to start. Check $POLLER_LOG"
+            Write-Host "[ERR] SQS poller failed to start. Check $POLLER_LOG"
             exit 1
         }
     }
@@ -362,17 +362,17 @@ switch ($Command) {
         if ((Test-Path $POLLER_PID) -and (Get-Process -Id (Get-Content $POLLER_PID) -ErrorAction SilentlyContinue)) {
             Stop-Process -Id (Get-Content $POLLER_PID) -Force
             Remove-Item $POLLER_PID -ErrorAction SilentlyContinue
-            Write-Host "✅ SQS poller stopped."
+            Write-Host "[OK] SQS poller stopped."
         } else {
-            Write-Host "ℹ️  SQS poller not running."
+            Write-Host "[INFO]  SQS poller not running."
         }
     }
 
     "status-poller" {
         if ((Test-Path $POLLER_PID) -and (Get-Process -Id (Get-Content $POLLER_PID) -ErrorAction SilentlyContinue)) {
-            Write-Host "✅ SQS poller running (PID $(Get-Content $POLLER_PID))"
+            Write-Host "[OK] SQS poller running (PID $(Get-Content $POLLER_PID))"
         } else {
-            Write-Host "❌ SQS poller not running."
+            Write-Host "[ERR] SQS poller not running."
         }
     }
 
@@ -380,21 +380,21 @@ switch ($Command) {
         # Requires NSSM: winget install nssm  OR  choco install nssm
         $nssm = Get-Command nssm -ErrorAction SilentlyContinue
         if (-not $nssm) {
-            Write-Host "❌ NSSM not found. Install it first:"
+            Write-Host "[ERR] NSSM not found. Install it first:"
             Write-Host "   winget install nssm"
-            Write-Host "   — or —"
+            Write-Host "   - or -"
             Write-Host "   choco install nssm"
             exit 1
         }
 
         if (WinService-Installed) {
-            Write-Host "⚠️  Service '$WIN_SERVICE_NAME' already exists. Run uninstall-service first to reinstall."
+            Write-Host "[WARN]  Service '$WIN_SERVICE_NAME' already exists. Run uninstall-service first to reinstall."
             exit 0
         }
 
         $pythonExe = (Get-Command python -ErrorAction SilentlyContinue).Source
         if (-not $pythonExe) {
-            Write-Host "❌ python not found in PATH"
+            Write-Host "[ERR] python not found in PATH"
             exit 1
         }
 
@@ -452,7 +452,7 @@ switch ($Command) {
         Start-Service -Name $WIN_SERVICE_NAME
         Start-Sleep -Seconds 3
         $svc = Get-Service -Name $WIN_SERVICE_NAME
-        Write-Host "✅ Service installed and started: $($svc.Status)"
+        Write-Host "[OK] Service installed and started: $($svc.Status)"
         Write-Host "   Name    : $WIN_SERVICE_NAME"
         Write-Host "   Logs    : $logOut"
         Write-Host "   Manage  : .\manage.ps1 start|stop|restart|status"
@@ -461,16 +461,16 @@ switch ($Command) {
     "uninstall-service" {
         $nssm = Get-Command nssm -ErrorAction SilentlyContinue
         if (-not $nssm) {
-            Write-Host "❌ NSSM not found in PATH"
+            Write-Host "[ERR] NSSM not found in PATH"
             exit 1
         }
         if (-not (WinService-Installed)) {
-            Write-Host "ℹ️  Service '$WIN_SERVICE_NAME' is not installed."
+            Write-Host "[INFO]  Service '$WIN_SERVICE_NAME' is not installed."
             exit 0
         }
         & nssm stop $WIN_SERVICE_NAME 2>$null
         & nssm remove $WIN_SERVICE_NAME confirm
-        Write-Host "✅ Windows service '$WIN_SERVICE_NAME' removed."
+        Write-Host "[OK] Windows service '$WIN_SERVICE_NAME' removed."
     }
 
     default {
