@@ -55,6 +55,7 @@ export default function Dashboard() {
         const snap = JSON.parse(e.data)
         if (snap.error) { setError(snap.error); return }
         if (snap.tokens)  setData(snap.tokens)
+        else if ('tokens' in snap) setData(false)  // tokens key present but null = not owner
         if (snap.session) setSession(snap.session)
         setLastUpdated(new Date(snap.ts))
         setError(null)
@@ -156,6 +157,14 @@ export default function Dashboard() {
       {error && (
         <div style={{ ...CARD, borderColor: '#ef4444', color: '#ef4444', marginBottom: 24 }}>
           ⚠️ {error}
+        </div>
+      )}
+
+      {(data === false || (!data && connected)) && !error && (
+        <div style={{ ...CARD, color: '#888', textAlign: 'center', padding: 40 }}>
+          {data === false
+            ? 'No token data available for your account on this machine.'
+            : 'Loading…'}
         </div>
       )}
 
