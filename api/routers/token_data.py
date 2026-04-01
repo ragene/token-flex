@@ -1236,21 +1236,44 @@ async def list_local_sessions(request: Request, token_payload: Optional[dict] = 
         pushed = _load_push_cache(database_url)
         owner_email = (pushed.get("owner_email") or "").strip() if pushed else ""
 
+        # Build per-user token totals from token_stats (lives in Postgres, written on every push)
+        stats_by_email: dict[str, dict] = {}
+        try:
+            for r in conn.execute("""
+                SELECT owner_email, total_tokens_approx, updated_at
+                FROM token_stats
+                WHERE owner_email != 'default'
+            """).fetchall():
+                stats_by_email[r["owner_email"]] = {
+                    "total_tokens": int(r["total_tokens_approx"] or 0),
+                }
+        except Exception as _e:
+            log.debug("token_stats lookup for usage skipped: %s", _e)
+            try:
+                conn._conn.rollback()
+            except Exception:
+                pass
+
+        # Extract call count + cost from push_cache events (owner's snapshot only)
+        # Non-active users won't have call/cost data since token_usage isn't synced to Postgres
+        push_calls_by_email: dict[str, int] = {}
+        push_cost_by_email: dict[str, float] = {}
+        if pushed:
+            push_events = pushed.get("events") or []
+            for ev in push_events:
+                ev_email = (ev.get("user_email") or owner_email or "").strip()
+                if ev_email:
+                    push_calls_by_email[ev_email] = push_calls_by_email.get(ev_email, 0) + 1
+                    push_cost_by_email[ev_email] = push_cost_by_email.get(ev_email, 0.0) + float(ev.get("cost_usd") or 0)
+
+        def _isostr(v):
+            if v is None: return None
+            return v.isoformat() if not isinstance(v, str) else v
+
         # Enrich each entry with usage stats and build final list
         sessions = []
         for email, entry in merged.items():
-            usage = conn.execute("""
-                SELECT
-                    COUNT(*) as total_calls,
-                    COALESCE(SUM(total_tokens), 0) as total_tokens,
-                    COALESCE(SUM(cost_usd), 0.0) as cost_usd
-                FROM token_usage WHERE user_email = %s
-            """, (email,)).fetchone()
-
-            def _isostr(v):
-                if v is None: return None
-                return v.isoformat() if not isinstance(v, str) else v
-
+            ts = stats_by_email.get(email, {})
             sessions.append({
                 "email":        email,
                 "name":         entry["name"],
@@ -1261,9 +1284,9 @@ async def list_local_sessions(request: Request, token_payload: Optional[dict] = 
                 "created_at":   _isostr(entry["created_at"]),
                 "is_active":    email == owner_email,
                 "sources":      entry.get("sources", []),
-                "total_calls":  int(usage["total_calls"] or 0),
-                "total_tokens": int(usage["total_tokens"] or 0),
-                "cost_usd":     round(float(usage["cost_usd"] or 0), 6),
+                "total_calls":  push_calls_by_email.get(email, 0),
+                "total_tokens": ts.get("total_tokens", 0),
+                "cost_usd":     round(push_cost_by_email.get(email, 0.0), 6),
             })
 
         # Sort: active first, then by last_seen desc
