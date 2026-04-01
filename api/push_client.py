@@ -362,14 +362,29 @@ def _build_snapshot(db_path: str) -> dict:
         if not events:
             owner_email = _get_owner_email()
             # Respect cleared_at — only show events after the last clear timestamp
-            _cleared_map = {}
+            _after = None
             try:
-                _pc = c.execute("SELECT payload FROM push_cache WHERE id = 1").fetchone()
-                if _pc:
-                    _cleared_map = json.loads(_pc[0]).get("cleared_at") or {}
+                # Try cleared_at_store first (normalized table)
+                _ca_row = None
+                if owner_email:
+                    _ca_row = c.execute(
+                        "SELECT cleared_at FROM cleared_at_store WHERE user_email = ?",
+                        (owner_email,)
+                    ).fetchone()
+                if not _ca_row:
+                    _ca_row = c.execute(
+                        "SELECT cleared_at FROM cleared_at_store WHERE user_email = '__all__' LIMIT 1"
+                    ).fetchone()
+                if _ca_row:
+                    _after = str(_ca_row[0]) if _ca_row[0] else None
+                else:
+                    # Fallback to push_cache cleared_at dict (migration path)
+                    _pc = c.execute("SELECT payload FROM push_cache WHERE id = 1").fetchone()
+                    if _pc:
+                        _cleared_map = json.loads(_pc[0]).get("cleared_at") or {}
+                        _after = _cleared_map.get(owner_email or "") or _cleared_map.get("__all__")
             except Exception:
                 pass
-            _after = _cleared_map.get(owner_email or "") or _cleared_map.get("__all__")
             session_events = _extract_session_usage(owner_email=owner_email, after=_after)
             if session_events:
                 events = session_events[-100:]  # latest 100
@@ -603,27 +618,48 @@ def push_snapshot(
     try:
         data = payload if payload is not None else _build_snapshot(db_path)
 
-        # Always write snapshot to local push_cache so /tokens has fresh data
+        # Write snapshot to snapshot_store so /tokens has fresh data
         # (including cached_chunks) regardless of remote push success.
         try:
             import sqlite3 as _sq
             _db_file = db_path.replace("sqlite:///", "") if db_path.startswith("sqlite") else \
                 os.environ.get("TOKEN_FLOW_DB", str(Path.home() / ".openclaw/data/token_flow.db"))
+            _owner = (data.get("owner_email") or "").strip() or "default"
             _lc = _sq.connect(_db_file)
             try:
                 _lc.execute(
-                    """INSERT INTO push_cache (id, payload, updated_at)
-                       VALUES (1, ?, datetime('now'))
-                       ON CONFLICT (id) DO UPDATE SET
-                           payload    = EXCLUDED.payload,
-                           updated_at = EXCLUDED.updated_at""",
-                    (json.dumps(data),),
+                    """INSERT INTO snapshot_store (
+                           owner_email, session_json, events_json, summary_json,
+                           chunks_json, memory_json, pipeline_json,
+                           chunk_total_count, chunk_total_tokens, updated_at
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                       ON CONFLICT (owner_email) DO UPDATE SET
+                           session_json       = EXCLUDED.session_json,
+                           events_json        = EXCLUDED.events_json,
+                           summary_json       = EXCLUDED.summary_json,
+                           chunks_json        = EXCLUDED.chunks_json,
+                           memory_json        = EXCLUDED.memory_json,
+                           pipeline_json      = EXCLUDED.pipeline_json,
+                           chunk_total_count  = EXCLUDED.chunk_total_count,
+                           chunk_total_tokens = EXCLUDED.chunk_total_tokens,
+                           updated_at         = EXCLUDED.updated_at""",
+                    (
+                        _owner,
+                        json.dumps(data.get("session"))        if data.get("session")         is not None else None,
+                        json.dumps(data.get("events"))         if data.get("events")          is not None else None,
+                        json.dumps(data.get("summary"))        if data.get("summary")         is not None else None,
+                        json.dumps(data.get("chunks"))         if data.get("chunks")          is not None else None,
+                        json.dumps(data.get("memory_entries")) if data.get("memory_entries")  is not None else None,
+                        json.dumps(data.get("pipeline_events")) if data.get("pipeline_events") is not None else None,
+                        data.get("chunk_total_count") or 0,
+                        data.get("chunk_total_tokens") or 0,
+                    ),
                 )
                 _lc.commit()
             finally:
                 _lc.close()
         except Exception as _lce:
-            log.debug("push_snapshot: local cache write failed (non-fatal): %s", _lce)
+            log.debug("push_snapshot: local snapshot_store write failed (non-fatal): %s", _lce)
 
         token = _get_push_token()
         if not token:

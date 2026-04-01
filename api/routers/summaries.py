@@ -118,7 +118,7 @@ async def list_summaries(
         ]
 
     # chunk_cache in remote Postgres is always empty — the local pipeline writes to
-    # SQLite only and syncs via push_snapshot.  Fall back to push_cache chunks so
+    # SQLite only and syncs via push_snapshot.  Fall back to snapshot_store chunks so
     # the Summaries page shows data after a distill+clear cycle.
     try:
         from db.pg_compat import connect as pg_connect
@@ -127,12 +127,25 @@ async def list_summaries(
         database_url: str = get_db_url(request)
         c2 = pg_connect(database_url)
         try:
-            row = c2.execute("SELECT payload FROM push_cache WHERE id = 1").fetchone()
+            # Try snapshot_store first (most recent row)
+            snap_row = c2.execute(
+                "SELECT chunks_json FROM snapshot_store ORDER BY updated_at DESC LIMIT 1"
+            ).fetchone()
+            cached_chunks = []
+            if snap_row and snap_row[0]:
+                try:
+                    cached_chunks = _json.loads(snap_row[0]) or []
+                except Exception:
+                    cached_chunks = []
+            if not cached_chunks:
+                # Fallback to push_cache (migration path)
+                pc_row = c2.execute("SELECT payload FROM push_cache WHERE id = 1").fetchone()
+                if pc_row:
+                    pushed = _json.loads(pc_row[0])
+                    cached_chunks = pushed.get("chunks") or []
         finally:
             c2.close()
-        if row:
-            pushed = _json.loads(row[0])
-            cached_chunks = pushed.get("chunks") or []
+        if cached_chunks:
             # Filter to summarized chunks only; apply source filter if given
             filtered = [
                 c for c in cached_chunks

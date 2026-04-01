@@ -210,28 +210,49 @@ class RemotePusher:
             return False
 
     def _write_local_cache(self, payload: dict) -> None:
-        """Write the push snapshot to the local push_cache table."""
+        """Write the push snapshot to the local snapshot_store table."""
         try:
             import sqlite3 as _sq
             db_path = os.environ.get(
                 "TOKEN_FLOW_DB",
                 str(Path.home() / ".openclaw/data/token_flow.db")
             )
+            owner = (payload.get("owner_email") or "").strip() or "default"
             c = _sq.connect(db_path)
             try:
                 c.execute(
-                    """INSERT INTO push_cache (id, payload, updated_at)
-                       VALUES (1, ?, datetime('now'))
-                       ON CONFLICT (id) DO UPDATE SET
-                           payload    = EXCLUDED.payload,
-                           updated_at = EXCLUDED.updated_at""",
-                    (json.dumps(payload),),
+                    """INSERT INTO snapshot_store (
+                           owner_email, session_json, events_json, summary_json,
+                           chunks_json, memory_json, pipeline_json,
+                           chunk_total_count, chunk_total_tokens, updated_at
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                       ON CONFLICT (owner_email) DO UPDATE SET
+                           session_json       = EXCLUDED.session_json,
+                           events_json        = EXCLUDED.events_json,
+                           summary_json       = EXCLUDED.summary_json,
+                           chunks_json        = EXCLUDED.chunks_json,
+                           memory_json        = EXCLUDED.memory_json,
+                           pipeline_json      = EXCLUDED.pipeline_json,
+                           chunk_total_count  = EXCLUDED.chunk_total_count,
+                           chunk_total_tokens = EXCLUDED.chunk_total_tokens,
+                           updated_at         = EXCLUDED.updated_at""",
+                    (
+                        owner,
+                        json.dumps(payload.get("session"))         if payload.get("session")         is not None else None,
+                        json.dumps(payload.get("events"))          if payload.get("events")          is not None else None,
+                        json.dumps(payload.get("summary"))         if payload.get("summary")         is not None else None,
+                        json.dumps(payload.get("chunks"))          if payload.get("chunks")          is not None else None,
+                        json.dumps(payload.get("memory_entries"))  if payload.get("memory_entries")  is not None else None,
+                        json.dumps(payload.get("pipeline_events")) if payload.get("pipeline_events") is not None else None,
+                        payload.get("chunk_total_count") or 0,
+                        payload.get("chunk_total_tokens") or 0,
+                    ),
                 )
                 c.commit()
             finally:
                 c.close()
         except Exception as e:
-            log.debug("remote_push: local cache write failed (non-fatal): %s", e)
+            log.debug("remote_push: local snapshot_store write failed (non-fatal): %s", e)
 
     # ── Loop ─────────────────────────────────────────────────────────────────
 

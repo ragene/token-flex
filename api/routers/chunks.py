@@ -116,20 +116,48 @@ import logging as _logging
 _log = _logging.getLogger(__name__)
 
 def _load_push_cache(request: Request) -> dict | None:
-    """Return the last push_cache snapshot, or None."""
+    """
+    Return the last snapshot for the most recent owner, or None.
+    Reads from snapshot_store (normalized table), falls back to push_cache (migration path).
+    """
     try:
         from api.db_helper import get_conn as _gc
         conn = _gc(request)
         try:
-            row = conn.execute("SELECT payload FROM push_cache WHERE id = 1").fetchone()
+            # Try snapshot_store first — most recent row
+            row = conn.execute(
+                "SELECT session_json, events_json, summary_json, chunks_json, "
+                "memory_json, pipeline_json, chunk_total_count, chunk_total_tokens "
+                "FROM snapshot_store ORDER BY updated_at DESC LIMIT 1"
+            ).fetchone()
             if row:
-                return _json.loads(row[0])
+                def _j(v):
+                    if v is None:
+                        return None
+                    try:
+                        return _json.loads(v)
+                    except Exception:
+                        return None
+                return {
+                    "session":            _j(row[0]),
+                    "events":             _j(row[1]) or [],
+                    "summary":            _j(row[2]),
+                    "chunks":             _j(row[3]) or [],
+                    "memory_entries":     _j(row[4]) or [],
+                    "pipeline_events":    _j(row[5]) or [],
+                    "chunk_total_count":  row[6] or 0,
+                    "chunk_total_tokens": row[7] or 0,
+                }
+            # Fallback: push_cache (migration path)
+            pc_row = conn.execute("SELECT payload FROM push_cache WHERE id = 1").fetchone()
+            if pc_row:
+                return _json.loads(pc_row[0])
             else:
-                _log.warning("push_cache: no row found (id=1)")
+                _log.warning("snapshot_store and push_cache: no row found")
         finally:
             conn.close()
     except Exception as e:
-        _log.warning("push_cache load failed: %s", e, exc_info=True)
+        _log.warning("_load_push_cache (snapshot_store) load failed: %s", e, exc_info=True)
     return None
 
 

@@ -94,11 +94,33 @@ _SCHEMA_SQL = """
     CREATE INDEX IF NOT EXISTS idx_fd_tok_email   ON fd_token_usage(user_email);
     CREATE INDEX IF NOT EXISTS idx_fd_tok_created ON fd_token_usage(created_at DESC);
 
-    -- Persisted push snapshot cache — survives ECS restarts
-    -- Only ever has one row (id=1), upserted on every push.
+    -- DEPRECATED: push_cache is superseded by snapshot_store + cleared_at_store.
+    -- Kept for one release cycle for migration path. Can be dropped after migration.
     CREATE TABLE IF NOT EXISTS push_cache (
         id         INTEGER PRIMARY KEY,
         payload    TEXT NOT NULL,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    -- Per-owner snapshot store — normalized replacement for push_cache JSON blob.
+    -- One row per owner_email; JSON columns store arrays/objects as TEXT.
+    CREATE TABLE IF NOT EXISTS snapshot_store (
+        owner_email        TEXT PRIMARY KEY,
+        session_json       TEXT,
+        events_json        TEXT,
+        summary_json       TEXT,
+        chunks_json        TEXT,
+        memory_json        TEXT,
+        pipeline_json      TEXT,
+        chunk_total_count  INTEGER DEFAULT 0,
+        chunk_total_tokens INTEGER DEFAULT 0,
+        updated_at         TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    -- Per-user cleared_at timestamps — replaces push_cache.cleared_at dict.
+    CREATE TABLE IF NOT EXISTS cleared_at_store (
+        user_email TEXT PRIMARY KEY,
+        cleared_at TIMESTAMPTZ NOT NULL,
         updated_at TIMESTAMPTZ DEFAULT NOW()
     );
 
@@ -226,9 +248,32 @@ _SCHEMA_SQL_SQLITE = """
         synced_at            TEXT DEFAULT (datetime('now'))
     );
 
+    -- DEPRECATED: push_cache is superseded by snapshot_store + cleared_at_store.
+    -- Kept for one release cycle for migration path. Can be dropped after migration.
     CREATE TABLE IF NOT EXISTS push_cache (
         id         INTEGER PRIMARY KEY,
         payload    TEXT NOT NULL,
+        updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    -- Per-owner snapshot store — normalized replacement for push_cache JSON blob.
+    CREATE TABLE IF NOT EXISTS snapshot_store (
+        owner_email        TEXT PRIMARY KEY,
+        session_json       TEXT,
+        events_json        TEXT,
+        summary_json       TEXT,
+        chunks_json        TEXT,
+        memory_json        TEXT,
+        pipeline_json      TEXT,
+        chunk_total_count  INTEGER DEFAULT 0,
+        chunk_total_tokens INTEGER DEFAULT 0,
+        updated_at         TEXT DEFAULT (datetime('now'))
+    );
+
+    -- Per-user cleared_at timestamps — replaces push_cache.cleared_at dict.
+    CREATE TABLE IF NOT EXISTS cleared_at_store (
+        user_email TEXT PRIMARY KEY,
+        cleared_at TEXT NOT NULL,
         updated_at TEXT DEFAULT (datetime('now'))
     );
 

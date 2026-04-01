@@ -55,15 +55,76 @@ def _conn(request: Request):
     return c
 
 
+def _load_snapshot(conn, owner_email: Optional[str] = None) -> dict | None:
+    """
+    Load the last persisted push snapshot from snapshot_store.
+    Falls back to push_cache if no snapshot_store row found (migration path).
+    Returns a dict in the same shape as the old push_cache payload, or None.
+    """
+    # Try snapshot_store first
+    try:
+        if owner_email:
+            row = conn.execute(
+                "SELECT session_json, events_json, summary_json, chunks_json, "
+                "memory_json, pipeline_json, chunk_total_count, chunk_total_tokens "
+                "FROM snapshot_store WHERE owner_email = ?",
+                (owner_email,)
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT session_json, events_json, summary_json, chunks_json, "
+                "memory_json, pipeline_json, chunk_total_count, chunk_total_tokens "
+                "FROM snapshot_store ORDER BY updated_at DESC LIMIT 1"
+            ).fetchone()
+        if row:
+            def _j(v):
+                if v is None:
+                    return None
+                try:
+                    return _json.loads(v)
+                except Exception:
+                    return None
+            return {
+                "owner_email":        owner_email,
+                "session":            _j(row[0]),
+                "events":             _j(row[1]) or [],
+                "summary":            _j(row[2]),
+                "chunks":             _j(row[3]) or [],
+                "memory_entries":     _j(row[4]) or [],
+                "pipeline_events":    _j(row[5]) or [],
+                "chunk_total_count":  row[6] or 0,
+                "chunk_total_tokens": row[7] or 0,
+            }
+    except Exception as exc:
+        log.debug("_load_snapshot from snapshot_store failed (non-fatal): %s", exc)
+
+    # Fallback: try push_cache (migration path for existing data)
+    try:
+        row = conn.execute("SELECT payload FROM push_cache WHERE id = 1").fetchone()
+        if row:
+            data = _json.loads(row[0])
+            # If owner_email filter set, check match
+            if owner_email:
+                pc_owner = (data.get("owner_email") or "").strip()
+                if pc_owner and pc_owner != owner_email:
+                    return None
+            return data
+    except Exception as exc:
+        log.debug("_load_snapshot push_cache fallback failed (non-fatal): %s", exc)
+
+    return None
+
+
 def _load_push_cache(database_url: str) -> dict | None:
-    """Load the last persisted push snapshot from push_cache. Returns None if empty."""
+    """
+    Thin wrapper around _load_snapshot for backward compatibility.
+    Loads from snapshot_store (most recent row), falls back to push_cache.
+    """
     try:
         c = pg_connect(database_url)
         init_db(c)
         try:
-            row = c.execute("SELECT payload FROM push_cache WHERE id = 1").fetchone()
-            if row:
-                return _json.loads(row[0])
+            return _load_snapshot(c, owner_email=None)
         finally:
             c.close()
     except Exception as exc:
@@ -383,7 +444,16 @@ def _build_snapshot(database_url: str, user_email: Optional[str] = None) -> dict
     except Exception as _ts_err:
         log.debug("token_stats read failed: %s", _ts_err)
 
-    pushed = _load_push_cache(database_url)
+    # Load snapshot from snapshot_store (or push_cache fallback) with a fresh connection
+    pushed = None
+    try:
+        _snap_conn = pg_connect(database_url)
+        try:
+            pushed = _load_snapshot(_snap_conn, owner_email=user_email)
+        finally:
+            _snap_conn.close()
+    except Exception as _snap_err:
+        log.debug("_load_snapshot failed (non-fatal): %s", _snap_err)
 
     if _ts_row:
         r = dict(_ts_row)
@@ -783,30 +853,62 @@ async def push_snapshot(body: PushSnapshotIn, request: Request) -> dict:
         except Exception as exc:
             log.debug("local_sessions upsert on push (non-fatal): %s", exc)
 
-    # ── 2. Also update push_cache (for chunks/events/session backwards compat) ─
+    # ── 2. Upsert snapshot_store (normalized replacement for push_cache JSON blob) ─
     try:
-        existing = _load_push_cache(database_url) or {}
-        for field in ("chunks", "chunk_total_count", "chunk_total_tokens",
-                      "events", "summary", "memory_entries", "pipeline_events", "session"):
-            if not payload.get(field) and existing.get(field):
-                payload[field] = existing[field]
-        if not payload.get("owner_email") and existing.get("owner_email"):
-            payload["owner_email"] = existing["owner_email"]
-        if not payload.get("ts"):
-            payload["ts"] = datetime.utcnow().isoformat() + "Z"
-
         conn2 = _conn(request)
         try:
+            # Merge with existing snapshot so fields not in this push are preserved
+            existing_snap = _load_snapshot(conn2, owner_email=owner) or {}
+
+            def _pick(field):
+                """Use new payload value if present, else fall back to existing snapshot."""
+                v = payload.get(field)
+                if v is None:
+                    v = existing_snap.get(field)
+                return v
+
+            session_val      = _pick("session")
+            events_val       = _pick("events")
+            summary_val      = _pick("summary")
+            chunks_val       = _pick("chunks")
+            memory_val       = _pick("memory_entries")
+            pipeline_val     = _pick("pipeline_events")
+            ctc              = payload.get("chunk_total_count")  or existing_snap.get("chunk_total_count")  or 0
+            ctt              = payload.get("chunk_total_tokens") or existing_snap.get("chunk_total_tokens") or 0
+
             conn2.execute(
-                """INSERT INTO push_cache (id, payload, updated_at) VALUES (1, ?, NOW())
-                   ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()""",
-                (_json.dumps(payload),),
+                """INSERT INTO snapshot_store (
+                       owner_email, session_json, events_json, summary_json,
+                       chunks_json, memory_json, pipeline_json,
+                       chunk_total_count, chunk_total_tokens, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+                   ON CONFLICT (owner_email) DO UPDATE SET
+                       session_json       = EXCLUDED.session_json,
+                       events_json        = EXCLUDED.events_json,
+                       summary_json       = EXCLUDED.summary_json,
+                       chunks_json        = EXCLUDED.chunks_json,
+                       memory_json        = EXCLUDED.memory_json,
+                       pipeline_json      = EXCLUDED.pipeline_json,
+                       chunk_total_count  = EXCLUDED.chunk_total_count,
+                       chunk_total_tokens = EXCLUDED.chunk_total_tokens,
+                       updated_at         = NOW()""",
+                (
+                    owner,
+                    _json.dumps(session_val)   if session_val   is not None else None,
+                    _json.dumps(events_val)    if events_val    is not None else None,
+                    _json.dumps(summary_val)   if summary_val   is not None else None,
+                    _json.dumps(chunks_val)    if chunks_val    is not None else None,
+                    _json.dumps(memory_val)    if memory_val    is not None else None,
+                    _json.dumps(pipeline_val)  if pipeline_val  is not None else None,
+                    ctc,
+                    ctt,
+                ),
             )
             conn2.commit()
         finally:
             conn2.close()
     except Exception as exc:
-        log.debug("push_cache update failed (non-fatal): %s", exc)
+        log.debug("snapshot_store upsert failed (non-fatal): %s", exc)
 
     # ── 3. Broadcast to WS clients — snapshot reads from token_stats ──────────
     await ws_manager.notify(
@@ -951,23 +1053,46 @@ async def list_events(
 @router.get("/token-data/cleared-at")
 async def get_cleared_at(request: Request, token_payload: Optional[dict] = Depends(verify_token)) -> dict:
     """
-    Return the cleared_at timestamp for the requesting user from push_cache.
+    Return the cleared_at timestamp for the requesting user from cleared_at_store.
     Used by the local push_client to exclude events before the last clear.
     """
     user_email = get_current_user_email(token_payload)
-    database_url: str = request.app.state.database_url
-    pushed = _load_push_cache(database_url)
-    if not pushed:
-        return {"cleared_at": None}
-    cleared_map = pushed.get("cleared_at") or {}
-    ts = cleared_map.get(user_email or "") or cleared_map.get("__all__")
-    return {"cleared_at": ts, "user_email": user_email}
+    conn = _conn(request)
+    try:
+        # Try cleared_at_store first (normalized table)
+        if user_email:
+            row = conn.execute(
+                "SELECT cleared_at FROM cleared_at_store WHERE user_email = ?",
+                (user_email,)
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT cleared_at FROM cleared_at_store WHERE user_email = '__all__' LIMIT 1"
+            ).fetchone()
+        if row:
+            ts = str(row[0]) if row[0] else None
+            return {"cleared_at": ts, "user_email": user_email}
+
+        # Fallback: check push_cache cleared_at dict (migration path)
+        try:
+            pc_row = conn.execute("SELECT payload FROM push_cache WHERE id = 1").fetchone()
+            if pc_row:
+                pushed = _json.loads(pc_row[0])
+                cleared_map = pushed.get("cleared_at") or {}
+                ts = cleared_map.get(user_email or "") or cleared_map.get("__all__")
+                return {"cleared_at": ts, "user_email": user_email}
+        except Exception:
+            pass
+    finally:
+        conn.close()
+    return {"cleared_at": None}
 
 
 @router.post("/token-data/clear-timestamp", status_code=200)
 async def set_cleared_at(request: Request, token_payload: Optional[dict] = Depends(verify_token)) -> dict:
     """
-    Set cleared_at timestamp in push_cache for the requesting user.
+    Set cleared_at timestamp in cleared_at_store for the requesting user.
+    Also wipes that user's events from snapshot_store.
     Called by the local poller after distill+clear completes so JSONL-sourced
     events before this timestamp are excluded from future push snapshots.
     """
@@ -981,30 +1106,35 @@ async def set_cleared_at(request: Request, token_payload: Optional[dict] = Depen
 
     database_url: str = request.app.state.database_url
     _now = datetime.utcnow().isoformat() + "Z"
+    _key = scoped_email if scoped_email else "__all__"
 
     try:
-        cached = _load_push_cache(database_url)
-        if not cached:
-            cached = {"ts": _now, "events": [], "summary": {"rows": [], "grand_total_tokens": 0,
-                      "grand_total_calls": 0, "grand_cost_usd": 0.0}}
-        cleared_map = cached.get("cleared_at") or {}
-        if scoped_email:
-            cleared_map[scoped_email] = _now
-        else:
-            cleared_map["__all__"] = _now
-        cached["cleared_at"] = cleared_map
-        # Also wipe events for this user from push_cache
-        cached["events"] = [e for e in (cached.get("events") or [])
-                            if e.get("user_email") != scoped_email] if scoped_email \
-                           else []
-        cached["ts"] = _now
         conn2 = _conn(request)
         try:
+            # Upsert cleared_at_store
             conn2.execute(
-                """INSERT INTO push_cache (id, payload, updated_at) VALUES (1, %s, NOW())
-                   ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()""",
-                (_json.dumps(cached),)
+                """INSERT INTO cleared_at_store (user_email, cleared_at, updated_at)
+                   VALUES (?, ?, NOW())
+                   ON CONFLICT (user_email) DO UPDATE SET
+                       cleared_at = EXCLUDED.cleared_at,
+                       updated_at = NOW()""",
+                (_key, _now),
             )
+
+            # Also wipe events for this user from snapshot_store
+            if scoped_email:
+                # Load existing snapshot, remove user's events, re-save
+                snap = _load_snapshot(conn2, owner_email=scoped_email)
+                if snap:
+                    filtered_events = [
+                        e for e in (snap.get("events") or [])
+                        if e.get("user_email") != scoped_email
+                    ]
+                    conn2.execute(
+                        "UPDATE snapshot_store SET events_json = ?, updated_at = NOW() WHERE owner_email = ?",
+                        (_json.dumps(filtered_events), scoped_email),
+                    )
+
             conn2.commit()
         finally:
             conn2.close()
@@ -1232,8 +1362,12 @@ async def list_local_sessions(request: Request, token_payload: Optional[dict] = 
                     merged[email]["last_seen"] = r["last_seen"]
                 merged[email].setdefault("sources", []).append("local_sessions")
 
-        # Determine active user from push_cache
-        pushed = _load_push_cache(database_url)
+        # Determine active user from snapshot_store (most recently updated row)
+        pushed = None
+        try:
+            pushed = _load_snapshot(conn, owner_email=None)
+        except Exception:
+            pass
         owner_email = (pushed.get("owner_email") or "").strip() if pushed else ""
 
         # Build per-user token totals from token_stats (lives in Postgres, written on every push)
@@ -1254,7 +1388,7 @@ async def list_local_sessions(request: Request, token_payload: Optional[dict] = 
             except Exception:
                 pass
 
-        # Extract call count + cost from push_cache events (owner's snapshot only)
+        # Extract call count + cost from snapshot_store events (owner's snapshot only)
         # Non-active users won't have call/cost data since token_usage isn't synced to Postgres
         push_calls_by_email: dict[str, int] = {}
         push_cost_by_email: dict[str, float] = {}
