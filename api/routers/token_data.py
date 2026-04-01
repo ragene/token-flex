@@ -97,6 +97,10 @@ def _load_snapshot(conn, owner_email: Optional[str] = None) -> dict | None:
             }
     except Exception as exc:
         log.debug("_load_snapshot from snapshot_store failed (non-fatal): %s", exc)
+        try:
+            conn._conn.rollback()
+        except Exception:
+            pass
 
     # Fallback: try push_cache (migration path for existing data)
     try:
@@ -111,6 +115,10 @@ def _load_snapshot(conn, owner_email: Optional[str] = None) -> dict | None:
             return data
     except Exception as exc:
         log.debug("_load_snapshot push_cache fallback failed (non-fatal): %s", exc)
+        try:
+            conn._conn.rollback()
+        except Exception:
+            pass
 
     return None
 
@@ -908,7 +916,7 @@ async def push_snapshot(body: PushSnapshotIn, request: Request) -> dict:
         finally:
             conn2.close()
     except Exception as exc:
-        log.debug("snapshot_store upsert failed (non-fatal): %s", exc)
+        log.warning("snapshot_store upsert failed: %s", exc, exc_info=True)
 
     # ── 3. Broadcast to WS clients — snapshot reads from token_stats ──────────
     await ws_manager.notify(
