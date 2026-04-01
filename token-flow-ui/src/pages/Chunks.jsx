@@ -31,7 +31,7 @@ export default function Chunks() {
   // Filters
   const [minScore, setMinScore] = useState(0)
   const [source, setSource] = useState('')
-  const [limit, setLimit] = useState(50)
+  const [limit, setLimit] = useState(100)
 
   // Summarize modal state
   const [topPct, setTopPct] = useState(0.4)
