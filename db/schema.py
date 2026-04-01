@@ -103,7 +103,7 @@ _SCHEMA_SQL = """
     );
 
     -- Live token stats — upserted by the local push client on every push.
-    -- Single row per owner_email. Dashboard reads this directly; no push_cache needed.
+    -- Single row per owner_email. Dashboard reads directly from this table.
     CREATE TABLE IF NOT EXISTS token_stats (
         owner_email           TEXT PRIMARY KEY,
         total_tokens_approx   INTEGER NOT NULL DEFAULT 0,

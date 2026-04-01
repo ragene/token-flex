@@ -89,6 +89,32 @@ class RemotePusher:
         with _ur.urlopen(req, timeout=5) as r:
             return json.loads(r.read())
 
+    def _fetch_snapshot(self) -> dict:
+        """GET /token-data/summary from local service to get events + summary for push."""
+        import urllib.request as _ur
+        try:
+            token = self._get_token()
+            # Fetch summary (aggregated totals by operation/model)
+            url_summary = f"http://localhost:{self.local_port}/token-data/summary"
+            req = _ur.Request(url_summary)
+            if token:
+                req.add_header("Authorization", f"Bearer {token}")
+            with _ur.urlopen(req, timeout=5) as r:
+                summary_data = json.loads(r.read())
+
+            # Fetch recent events
+            url_events = f"http://localhost:{self.local_port}/token-data/events?limit=200"
+            req2 = _ur.Request(url_events)
+            if token:
+                req2.add_header("Authorization", f"Bearer {token}")
+            with _ur.urlopen(req2, timeout=5) as r2:
+                events_data = json.loads(r2.read())
+
+            return {"summary": summary_data, "events": events_data}
+        except Exception as e:
+            log.debug("_fetch_snapshot failed (non-fatal): %s", e)
+            return {}
+
     def _build_payload(self) -> dict:
         """Build the snapshot payload from live /tokens data."""
         tokens_raw = self._fetch_tokens()
@@ -115,17 +141,25 @@ class RemotePusher:
             "cached_chunk_tokens":   tokens_raw.get("cached_chunk_tokens", 0),
         }
 
-        return {
+        # Fetch summary + events from local service (every push so remote always has fresh data)
+        snapshot_extra = self._fetch_snapshot()
+
+        payload = {
             "ts":                  datetime.now(timezone.utc).isoformat(),
             "owner_email":         self._get_owner_email(),
             "tokens":              tokens,
             # These totals come from /tokens and are always accurate.
-            # The push handler on ECS will merge these into existing push_cache
-            # so chunk rows are preserved even though we don't send them here.
             "chunk_total_count":   tokens.get("cached_chunks", 0),
             "chunk_total_tokens":  tokens.get("cached_chunk_tokens", 0),
-            # Omit chunks/events/summary — ECS merge logic keeps existing values.
         }
+
+        # Include summary + events so Token Data view shows real usage history
+        if snapshot_extra.get("summary"):
+            payload["summary"] = snapshot_extra["summary"]
+        if snapshot_extra.get("events"):
+            payload["events"] = snapshot_extra["events"]
+
+        return payload
 
     # ── Remote push ───────────────────────────────────────────────────────────
 
