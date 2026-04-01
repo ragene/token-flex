@@ -103,7 +103,7 @@ _SCHEMA_SQL = """
     );
 
     -- Per-owner snapshot store — normalized replacement for push_cache JSON blob.
-    -- One row per owner_email; JSON columns store arrays/objects as TEXT.
+    -- One row per owner_email. JSON columns store arrays/objects as TEXT.
     CREATE TABLE IF NOT EXISTS snapshot_store (
         owner_email        TEXT PRIMARY KEY,
         session_json       TEXT,
@@ -343,7 +343,11 @@ def init_db(conn) -> None:
 
     # PostgreSQL: run each statement independently so errors don't cascade
     from db.pg_compat import _adapt_sql
-    adapted = _adapt_sql(_SCHEMA_SQL)
+    import re as _re
+    # Strip SQL line comments before splitting on ';' to avoid comment text
+    # containing semicolons being treated as statement fragments.
+    schema_no_comments = _re.sub(r'--[^\n]*', '', _SCHEMA_SQL)
+    adapted = _adapt_sql(schema_no_comments)
     pg_conn = inner
     for stmt in adapted.split(';'):
         stmt = stmt.strip()
