@@ -745,6 +745,44 @@ async def push_snapshot(body: PushSnapshotIn, request: Request) -> dict:
         _db_error = str(exc)
         log.warning("token_stats upsert FAILED: %s", exc, exc_info=True)
 
+    # ── 1b. Upsert local_sessions so push clients appear in Sessions view ────────
+    if owner and owner != "default":
+        try:
+            conn3 = _conn(request)
+            try:
+                # Grab any JWT identity fields that may have been sent in the payload
+                jwt_name    = payload.get("name") or payload.get("display_name")
+                jwt_picture = payload.get("picture")
+                jwt_host    = payload.get("host") or payload.get("hostname")
+                jwt_sub     = payload.get("auth0_sub") or payload.get("sub")
+                jwt_sid     = payload.get("session_id")
+                existing_ls = conn3.execute(
+                    "SELECT id FROM local_sessions WHERE email = %s", (owner,)
+                ).fetchone()
+                if existing_ls:
+                    conn3.execute(
+                        """UPDATE local_sessions
+                           SET last_seen = NOW(),
+                               name       = COALESCE(%s, name),
+                               picture    = COALESCE(%s, picture),
+                               host       = COALESCE(%s, host),
+                               session_id = COALESCE(%s, session_id),
+                               auth0_sub  = COALESCE(%s, auth0_sub)
+                           WHERE email = %s""",
+                        (jwt_name, jwt_picture, jwt_host, jwt_sid, jwt_sub, owner),
+                    )
+                else:
+                    conn3.execute(
+                        """INSERT INTO local_sessions (email, name, picture, auth0_sub, host, session_id)
+                           VALUES (%s, %s, %s, %s, %s, %s)""",
+                        (owner, jwt_name, jwt_picture, jwt_sub, jwt_host, jwt_sid),
+                    )
+                conn3.commit()
+            finally:
+                conn3.close()
+        except Exception as exc:
+            log.debug("local_sessions upsert on push (non-fatal): %s", exc)
+
     # ── 2. Also update push_cache (for chunks/events/session backwards compat) ─
     try:
         existing = _load_push_cache(database_url) or {}
@@ -1104,52 +1142,137 @@ def _row_out(r) -> TokenUsageOut:
 @router.get("/token-data/sessions", dependencies=[Depends(require_role("admin"))])
 async def list_local_sessions(request: Request, token_payload: Optional[dict] = Depends(verify_token)) -> list:
     """
-    List all known local sessions (users who have pushed a snapshot).
-    Admin only. Returns email, name, host, last_seen, and per-user token usage totals.
+    List ALL users ever seen — union of tf_users (SSO logins), token_stats (push clients),
+    and local_sessions (identify calls). Enriched with per-user token usage totals.
+    Admin only.
     """
     database_url: str = request.app.state.database_url
     conn = _conn(request)
     try:
-        rows = conn.execute("""
+        # Build a merged set of all emails ever seen, preferring richer data sources.
+        # Source priority for identity fields: local_sessions > tf_users > token_stats
+        merged: dict[str, dict] = {}
+
+        # 1. Seed from tf_users (everyone who has ever logged in via SSO)
+        for r in conn.execute("""
+            SELECT email, name, NULL AS picture, NULL AS host, NULL AS session_id,
+                   last_login AS last_seen, created_at
+            FROM tf_users
+            ORDER BY created_at ASC
+        """).fetchall():
+            email = r["email"]
+            merged[email] = {
+                "email":      email,
+                "name":       r["name"],
+                "picture":    None,
+                "host":       None,
+                "session_id": None,
+                "last_seen":  r["last_seen"],
+                "created_at": r["created_at"],
+                "sources":    ["tf_users"],
+            }
+
+        # 2. Overlay token_stats (everyone who has ever pushed token data)
+        try:
+            token_stats_rows = conn.execute("""
+                SELECT owner_email AS email, updated_at AS last_seen
+                FROM token_stats
+                ORDER BY updated_at ASC
+            """).fetchall()
+        except Exception as _e:
+            # Table may not exist yet — roll back aborted txn then skip gracefully
+            log.debug("token_stats query skipped (table may not exist): %s", _e)
+            try:
+                conn._conn.rollback()
+            except Exception:
+                pass
+            token_stats_rows = []
+        for r in token_stats_rows:
+            email = r["email"]
+            if email and email != "default":
+                if email not in merged:
+                    merged[email] = {
+                        "email": email, "name": None, "picture": None,
+                        "host": None, "session_id": None,
+                        "last_seen": r["last_seen"], "created_at": r["last_seen"],
+                        "sources": ["token_stats"],
+                    }
+                else:
+                    merged[email]["sources"].append("token_stats")
+                    # Update last_seen if more recent
+                    if r["last_seen"] and (not merged[email]["last_seen"] or
+                            str(r["last_seen"]) > str(merged[email]["last_seen"])):
+                        merged[email]["last_seen"] = r["last_seen"]
+
+        # 3. Overlay local_sessions (richest identity data — name, picture, host)
+        for r in conn.execute("""
             SELECT email, name, picture, host, session_id, last_seen, created_at
             FROM local_sessions
             ORDER BY last_seen DESC
-        """).fetchall()
-        sessions = []
-        for r in rows:
-            last_seen = r["last_seen"]
-            if last_seen and not isinstance(last_seen, str):
-                last_seen = last_seen.isoformat()
-            created_at = r["created_at"]
-            if created_at and not isinstance(created_at, str):
-                created_at = created_at.isoformat()
+        """).fetchall():
+            email = r["email"]
+            if email not in merged:
+                merged[email] = {
+                    "email": email, "name": r["name"], "picture": r["picture"],
+                    "host": r["host"], "session_id": r["session_id"],
+                    "last_seen": r["last_seen"], "created_at": r["created_at"],
+                    "sources": ["local_sessions"],
+                }
+            else:
+                # Enrich with identity fields from local_sessions (most authoritative)
+                if r["name"]:    merged[email]["name"]       = r["name"]
+                if r["picture"]: merged[email]["picture"]    = r["picture"]
+                if r["host"]:    merged[email]["host"]        = r["host"]
+                if r["session_id"]: merged[email]["session_id"] = r["session_id"]
+                if r["created_at"] and (not merged[email]["created_at"] or
+                        str(r["created_at"]) < str(merged[email]["created_at"])):
+                    merged[email]["created_at"] = r["created_at"]
+                if r["last_seen"] and (not merged[email]["last_seen"] or
+                        str(r["last_seen"]) > str(merged[email]["last_seen"])):
+                    merged[email]["last_seen"] = r["last_seen"]
+                merged[email].setdefault("sources", []).append("local_sessions")
 
-            # Per-user token usage totals from token_usage
+        # Determine active user from push_cache
+        pushed = _load_push_cache(database_url)
+        owner_email = (pushed.get("owner_email") or "").strip() if pushed else ""
+
+        # Enrich each entry with usage stats and build final list
+        sessions = []
+        for email, entry in merged.items():
             usage = conn.execute("""
                 SELECT
                     COUNT(*) as total_calls,
                     COALESCE(SUM(total_tokens), 0) as total_tokens,
                     COALESCE(SUM(cost_usd), 0.0) as cost_usd
                 FROM token_usage WHERE user_email = %s
-            """, (r["email"],)).fetchone()
+            """, (email,)).fetchone()
 
-            # Check if this user's email matches the push_cache owner_email
-            pushed = _load_push_cache(database_url)
-            owner_email = (pushed.get("owner_email") or "") if pushed else ""
+            def _isostr(v):
+                if v is None: return None
+                return v.isoformat() if not isinstance(v, str) else v
 
             sessions.append({
-                "email":       r["email"],
-                "name":        r["name"],
-                "picture":     r["picture"],
-                "host":        r["host"],
-                "session_id":  r["session_id"],
-                "last_seen":   last_seen,
-                "created_at":  created_at,
-                "is_active":   r["email"] == owner_email,
-                "total_calls": int(usage["total_calls"] or 0),
+                "email":        email,
+                "name":         entry["name"],
+                "picture":      entry["picture"],
+                "host":         entry["host"],
+                "session_id":   entry["session_id"],
+                "last_seen":    _isostr(entry["last_seen"]),
+                "created_at":   _isostr(entry["created_at"]),
+                "is_active":    email == owner_email,
+                "sources":      entry.get("sources", []),
+                "total_calls":  int(usage["total_calls"] or 0),
                 "total_tokens": int(usage["total_tokens"] or 0),
-                "cost_usd":    round(float(usage["cost_usd"] or 0), 6),
+                "cost_usd":     round(float(usage["cost_usd"] or 0), 6),
             })
+
+        # Sort: active first, then by last_seen desc
+        sessions.sort(key=lambda s: (
+            0 if s["is_active"] else 1,
+            -(0 if not s["last_seen"] else
+              int(__import__("datetime").datetime.fromisoformat(
+                  s["last_seen"].rstrip("Z")).timestamp()))
+        ))
         return sessions
     finally:
         conn.close()

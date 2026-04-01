@@ -10,6 +10,18 @@ function fmtDate(s) {
   if (!s) return '—'
   return new Date(s.endsWith('Z') ? s : s + 'Z').toLocaleString()
 }
+function fmtRelative(s) {
+  if (!s) return null
+  const diff = Date.now() - new Date(s.endsWith('Z') ? s : s + 'Z').getTime()
+  const mins = Math.floor(diff / 60000)
+  if (mins < 2)  return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24)  return `${hrs}h ago`
+  const days = Math.floor(hrs / 24)
+  if (days < 30) return `${days}d ago`
+  return fmtDate(s)
+}
 
 function Avatar({ name, picture, size = 36 }) {
   if (picture) return (
@@ -48,11 +60,19 @@ function ActionButton({ label, onClick, danger, disabled, loading }) {
   )
 }
 
+const FILTERS = [
+  { key: 'all',      label: 'All' },
+  { key: 'active',   label: 'Active' },
+  { key: 'inactive', label: 'Inactive' },
+]
+
 export default function Sessions() {
   const [sessions, setSessions] = useState([])
   const [loading,  setLoading]  = useState(true)
   const [error,    setError]    = useState(null)
   const [actions,  setActions]  = useState({})
+  const [filter,   setFilter]   = useState('all')
+  const [search,   setSearch]   = useState('')
 
   const load = useCallback(async () => {
     setLoading(true); setError(null)
@@ -81,11 +101,32 @@ export default function Sessions() {
     }
   }
 
+  const filtered = sessions.filter(s => {
+    if (filter === 'active'   && !s.is_active) return false
+    if (filter === 'inactive' &&  s.is_active) return false
+    if (search) {
+      const q = search.toLowerCase()
+      return (s.email || '').toLowerCase().includes(q) ||
+             (s.name  || '').toLowerCase().includes(q) ||
+             (s.host  || '').toLowerCase().includes(q)
+    }
+    return true
+  })
+
+  const activeCount   = sessions.filter(s =>  s.is_active).length
+  const inactiveCount = sessions.filter(s => !s.is_active).length
 
   return (
     <div>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24 }}>
-        <h1 style={{ fontSize: 24, fontWeight: 700, color: '#fff', margin: 0 }}>🖥️ Active Sessions</h1>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+        <div>
+          <h1 style={{ fontSize: 24, fontWeight: 700, color: '#fff', margin: 0 }}>🖥️ Sessions</h1>
+          <div style={{ fontSize: 12, color: '#555', marginTop: 4 }}>
+            {sessions.length} user{sessions.length !== 1 ? 's' : ''} ever connected
+            {activeCount > 0 && <span style={{ color: '#22c55e', marginLeft: 8 }}>· {activeCount} active</span>}
+          </div>
+        </div>
         <button onClick={load}
           style={{ background: '#2a2a40', color: '#ccc', border: '1px solid #333',
                    borderRadius: 8, padding: '7px 16px', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
@@ -93,38 +134,92 @@ export default function Sessions() {
         </button>
       </div>
 
+      {/* Filter + Search bar */}
+      <div style={{ display: 'flex', gap: 10, marginBottom: 20, alignItems: 'center', flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', background: '#0d0d1a', borderRadius: 8, border: '1px solid #2a2a40', overflow: 'hidden' }}>
+          {FILTERS.map(f => (
+            <button key={f.key} onClick={() => setFilter(f.key)}
+              style={{
+                padding: '6px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                border: 'none', borderRadius: 0,
+                background: filter === f.key ? '#2a2a40' : 'transparent',
+                color: filter === f.key ? '#fff' : '#555',
+                transition: 'all 0.15s',
+              }}>
+              {f.label}
+              {f.key === 'all'      && sessions.length > 0     && <span style={{ marginLeft: 5, opacity: 0.6 }}>{sessions.length}</span>}
+              {f.key === 'active'   && activeCount   > 0        && <span style={{ marginLeft: 5, color: '#22c55e' }}>{activeCount}</span>}
+              {f.key === 'inactive' && inactiveCount > 0        && <span style={{ marginLeft: 5, opacity: 0.6 }}>{inactiveCount}</span>}
+            </button>
+          ))}
+        </div>
+        <input
+          value={search} onChange={e => setSearch(e.target.value)}
+          placeholder="Search by name, email, host…"
+          style={{
+            flex: 1, minWidth: 180, background: '#0d0d1a', border: '1px solid #2a2a40',
+            borderRadius: 8, padding: '6px 12px', color: '#ccc', fontSize: 12,
+            outline: 'none',
+          }}
+        />
+      </div>
+
       {error && <div style={{ ...CARD, borderColor: '#ef4444', color: '#ef4444', marginBottom: 20 }}>⚠️ {error}</div>}
       {loading && !sessions.length && <div style={{ color: '#555', textAlign: 'center', paddingTop: 60 }}>Loading…</div>}
       {!loading && !sessions.length && !error && (
         <div style={{ ...CARD, color: '#555', textAlign: 'center', padding: 48 }}>
-          No local sessions found. Sessions appear here once users push a snapshot via the token-flow service.
+          No sessions found. Users appear here once they authenticate and push a snapshot via the token-flow service.
+        </div>
+      )}
+      {!loading && sessions.length > 0 && filtered.length === 0 && (
+        <div style={{ ...CARD, color: '#555', textAlign: 'center', padding: 48 }}>
+          No sessions match the current filter.
         </div>
       )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-        {sessions.map(s => {
+        {filtered.map(s => {
           const act = actions[s.email] || {}
           return (
             <div key={s.email} style={{ ...CARD, borderColor: s.is_active ? `${ACCENT}66` : '#2a2a40', position: 'relative' }}>
-              {s.is_active && (
-                <span style={{ position: 'absolute', top: 12, right: 12,
-                               display: 'inline-flex', alignItems: 'center', gap: 5,
-                               fontSize: 11, color: '#22c55e', fontWeight: 600 }}>
-                  <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#22c55e',
-                                 boxShadow: '0 0 6px #22c55e', display: 'inline-block' }} />
-                  active
-                </span>
-              )}
 
+              {/* Active / Last seen badge */}
+              <div style={{ position: 'absolute', top: 12, right: 12, display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3 }}>
+                {s.is_active ? (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5,
+                                 fontSize: 11, color: '#22c55e', fontWeight: 600 }}>
+                    <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#22c55e',
+                                   boxShadow: '0 0 6px #22c55e', display: 'inline-block' }} />
+                    active
+                  </span>
+                ) : (
+                  <span style={{ fontSize: 11, color: '#444', fontWeight: 500 }}>
+                    ● inactive
+                  </span>
+                )}
+                {s.last_seen && (
+                  <span style={{ fontSize: 10, color: '#3a3a55' }} title={fmtDate(s.last_seen)}>
+                    {fmtRelative(s.last_seen)}
+                  </span>
+                )}
+              </div>
+
+              {/* Identity row */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 16 }}>
                 <Avatar name={s.name} picture={s.picture} />
                 <div>
                   <div style={{ fontSize: 15, fontWeight: 600, color: '#e0e0e0' }}>{s.name || s.email}</div>
                   <div style={{ fontSize: 12, color: '#555' }}>{s.email}</div>
                   {s.host && <div style={{ fontSize: 11, color: '#444', marginTop: 2 }}>🖥 {s.host}</div>}
+                  {s.created_at && (
+                    <div style={{ fontSize: 10, color: '#333', marginTop: 2 }} title={fmtDate(s.created_at)}>
+                      First seen: {fmtDate(s.created_at)}
+                    </div>
+                  )}
                 </div>
               </div>
 
+              {/* Stats row */}
               <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap', marginBottom: 16 }}>
                 {[['Calls', fmt(s.total_calls), '#60a5fa'],
                   ['Tokens', fmt(s.total_tokens), ACCENT],
@@ -137,6 +232,7 @@ export default function Sessions() {
                 ))}
               </div>
 
+              {/* Actions */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                 <ActionButton label="🧠 Distill & Clear" onClick={() => handleDistill(s.email)}
                   loading={act.distill === 'pending'} disabled={act.clear === 'pending'} />
